@@ -1,0 +1,107 @@
+name: Extractor - Mercado Público
+
+# ─────────────────────────────────────────────────────────
+# Horario: 02:00 UTC = 22:00 Santiago hora de invierno (CLT/UTC-4)
+#          02:00 UTC = 23:00 Santiago hora de verano  (CLST/UTC-3)
+# ─────────────────────────────────────────────────────────
+on:
+  schedule:
+    - cron: '0 2 * * *'
+
+  # Ejecución manual desde GitHub UI o API
+  workflow_dispatch:
+    inputs:
+      hasta:
+        description: 'Fecha más antigua a procesar (ddmmaaaa)'
+        required: false
+        default: '01012015'
+      solo:
+        description: 'Tipo a extraer (licitaciones | ordenes | ambos)'
+        required: false
+        default: 'ambos'
+      max_requests:
+        description: 'Límite de requests para esta corrida'
+        required: false
+        default: '28000'
+
+jobs:
+  extraer:
+    name: Descarga datos de ChileCompra → Supabase
+    runs-on: ubuntu-latest
+    timeout-minutes: 340   # Máximo ~5h40m (límite de GH Actions es 6h)
+
+    env:
+      MERCADOPUBLICO_TICKET_1: ${{ secrets.MERCADOPUBLICO_TICKET_1 }}
+      MERCADOPUBLICO_TICKET_2: ${{ secrets.MERCADOPUBLICO_TICKET_2 }}
+      MERCADOPUBLICO_TICKET_3: ${{ secrets.MERCADOPUBLICO_TICKET_3 }}
+      SUPABASE_URL:             ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache de dependencias pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('scripts/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Instalar dependencias
+        run: pip install -r scripts/requirements.txt
+
+      - name: Verificar conexión a Supabase
+        run: |
+          python3 -c "
+          import os
+          from supabase import create_client
+          sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_ROLE_KEY'])
+          res = sb.table('extraccion_log').select('count', count='exact').execute()
+          print(f'Supabase OK — {res.count} entradas en extraccion_log')
+          "
+
+      - name: Ejecutar extractor (modo auto)
+        working-directory: scripts
+        run: |
+          # Determinar parámetros: usa inputs del dispatch o defaults del schedule
+          HASTA="${{ github.event.inputs.hasta || '01012015' }}"
+          SOLO="${{ github.event.inputs.solo || 'ambos' }}"
+          MAX_REQ="${{ github.event.inputs.max_requests || '28000' }}"
+
+          ARGS="--modo auto --hasta $HASTA --max-requests $MAX_REQ"
+
+          if [ "$SOLO" = "licitaciones" ]; then
+            ARGS="$ARGS --solo licitaciones"
+          elif [ "$SOLO" = "ordenes" ]; then
+            ARGS="$ARGS --solo ordenes"
+          fi
+
+          echo "Corriendo: python extractor.py $ARGS"
+          python extractor.py $ARGS
+
+      - name: Resumen de resultados
+        if: always()
+        run: |
+          python3 -c "
+          import os
+          from supabase import create_client
+
+          sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_ROLE_KEY'])
+
+          lic = sb.table('licitaciones').select('count', count='exact').execute().count
+          oc  = sb.table('ordenes_compra').select('count', count='exact').execute().count
+          log = sb.table('extraccion_log').select('estado').eq('estado','completado').execute()
+
+          print('─' * 40)
+          print(f'Licitaciones en BD:   {lic:,}')
+          print(f'Órdenes de compra:    {oc:,}')
+          print(f'Fechas completadas:   {len(log.data):,}')
+          print('─' * 40)
+          "
