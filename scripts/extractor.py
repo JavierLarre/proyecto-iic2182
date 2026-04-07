@@ -492,7 +492,9 @@ def procesar_dia_licitaciones(sb: Client, fecha: date, limiter: RateLimiter) -> 
     upsert_batch(sb, "licitaciones", licitaciones_batch, "codigo_externo")
     upsert_batch(sb, "items_licitacion", items_batch, "id")
 
-    log_fin(sb, fecha, "licitacion", "completado", len(codigos), procesados,
+    # Hoy nunca se marca completado — puede haber datos nuevos durante el día
+    estado_final = "parcial" if fecha == date.today() else "completado"
+    log_fin(sb, fecha, "licitacion", estado_final, len(codigos), procesados,
             limiter.total_used() - req_inicio)
     log.info(f"  ✓ {procesados} licitaciones guardadas")
     return procesados
@@ -556,7 +558,8 @@ def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter) -> int:
     upsert_batch(sb, "ordenes_compra",     oc_batch,          "codigo")
     upsert_batch(sb, "items_orden_compra", items_batch,       "id")
 
-    log_fin(sb, fecha, "orden_compra", "completado", len(codigos), procesados,
+    estado_final = "parcial" if fecha == date.today() else "completado"
+    log_fin(sb, fecha, "orden_compra", estado_final, len(codigos), procesados,
             limiter.total_used() - req_inicio)
     log.info(f"  ✓ {procesados} órdenes de compra guardadas")
     return procesados
