@@ -143,7 +143,7 @@ def _get(url: str, params: dict, limiter: RateLimiter) -> Optional[dict]:
     for intento in range(1, RETRY_MAX + 1):
         try:
             limiter.tick()
-            resp = requests.get(url, params=params, headers=HEADERS, timeout=30)
+            resp = requests.get(url, params=params, headers=HEADERS, timeout=90)
             time.sleep(REQUEST_DELAY)
 
             if resp.status_code == 404:
