@@ -104,6 +104,29 @@ class TiempoAgotado(Exception):
 
 
 # ─────────────────────────────────────────────
+# Utilidades de logging
+# ─────────────────────────────────────────────
+def _fmt_dur(segundos: float) -> str:
+    """Formatea segundos a string legible: 3h 04m 07s / 14m 03s / 47s."""
+    s = max(0, int(segundos))
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m {s:02d}s"
+
+
+def _barra(actual: int, total: int, ancho: int = 12) -> str:
+    """Barra de progreso ASCII. Ej: ████████░░░░"""
+    if total == 0:
+        return "░" * ancho
+    filled = min(ancho, int(ancho * actual / total))
+    return "█" * filled + "░" * (ancho - filled)
+
+
+# ─────────────────────────────────────────────
 # Rate Limiter con rotación de tickets
 # ─────────────────────────────────────────────
 class RateLimiter:
@@ -347,17 +370,20 @@ def parse_orden_compra(raw: dict) -> tuple[dict, list[dict], Optional[dict], Opt
 # ─────────────────────────────────────────────
 # Supabase helpers
 # ─────────────────────────────────────────────
-def upsert_batch(sb: Client, tabla: str, registros: list[dict], conflict_col: str):
-    """Upsert en lotes de BATCH_SIZE."""
+def upsert_batch(sb: Client, tabla: str, registros: list[dict], conflict_col: str) -> int:
+    """Upsert en lotes de BATCH_SIZE. Retorna el total de registros enviados."""
     if not registros:
-        return
+        return 0
+    total = 0
     for i in range(0, len(registros), BATCH_SIZE):
         lote = registros[i : i + BATCH_SIZE]
         try:
             sb.table(tabla).upsert(lote, on_conflict=conflict_col).execute()
-            log.info(f"  → Guardados {len(lote)} registros en {tabla}")
+            total += len(lote)
+            log.debug(f"    upsert {len(lote)} → {tabla}")
         except Exception as e:
-            log.error(f"Error al guardar en {tabla}: {e}")
+            log.error(f"    ERROR guardando en {tabla}: {e}")
+    return total
 
 
 def get_skip_codes(sb: Client, tabla: str, col_codigo: str, col_estado: str,
@@ -468,17 +494,17 @@ def generar_cola_auto(
                 cola.append((fecha, tipo))
         fecha -= timedelta(days=1)
 
-    total_dias = (hoy - hasta).days + 1
-    ya_hechos  = sum(
+    total_dias  = (hoy - hasta).days + 1
+    total_pares = total_dias * len(tipos)
+    ya_hechos   = sum(
         1 for d in (hasta + timedelta(days=i) for i in range(total_dias))
         for t in tipos
         if (d.isoformat(), t) in completados
     )
     pendientes = len(cola)
-    log.info(
-        f"Estado del historial ({hasta} → {hoy}): "
-        f"{ya_hechos} pares completados, {pendientes} pendientes"
-    )
+    pct_done   = ya_hechos / total_pares * 100 if total_pares else 0
+    log.info(f"  Historial {hasta} → {hoy}  ({total_pares:,} pares, {total_dias} días × {len(tipos)} tipos)")
+    log.info(f"  [{_barra(ya_hechos, total_pares)}] {ya_hechos:,} completados ({pct_done:.1f}%) | {pendientes:,} pendientes")
     return cola
 
 
@@ -488,7 +514,7 @@ def generar_cola_auto(
 def procesar_dia_licitaciones(sb: Client, fecha: date, limiter: RateLimiter,
                                deadline: Optional[datetime] = None) -> int:
     fecha_str = fecha.strftime("%d%m%Y")
-    log.info(f"[LIC] {fecha_str} — requests restantes: {limiter.remaining()}")
+    t0 = datetime.utcnow()
 
     log_inicio(sb, fecha, "licitacion")
     req_inicio = limiter.total_used()
@@ -497,40 +523,45 @@ def procesar_dia_licitaciones(sb: Client, fecha: date, limiter: RateLimiter,
     if not codigos:
         estado_final = "parcial" if fecha == date.today() else "completado"
         log_fin(sb, fecha, "licitacion", estado_final, 0, 0, limiter.total_used() - req_inicio)
-        log.info("  → Sin licitaciones para esta fecha")
+        log.info("    Sin licitaciones en la API para esta fecha")
         return 0
 
     skip, actualizar = get_skip_codes(sb, "licitaciones", "codigo_externo", "estado",
                                        codigos, ESTADOS_FINALES_LIC)
     codigos_a_procesar = [c for c in codigos if c not in skip]
-    nuevos = len(codigos) - len(skip) - len(actualizar)
-    log.info(f"  → {len(codigos)} licitaciones | {len(skip)} skip (estado final) "
-             f"| {len(actualizar)} a actualizar | {nuevos} nuevas")
+    n_nuevas = len(codigos) - len(skip) - len(actualizar)
+    log.info(
+        f"    API:{len(codigos):>5}  |  skip(final):{len(skip):>5}  |"
+        f"  actualizar:{len(actualizar):>5}  |  nuevas:{n_nuevas:>5}  |"
+        f"  a procesar:{len(codigos_a_procesar):>5}"
+    )
 
     if not codigos_a_procesar:
         estado_final = "parcial" if fecha == date.today() else "completado"
         log_fin(sb, fecha, "licitacion", estado_final, len(codigos), 0, limiter.total_used() - req_inicio)
-        log.info("  ✓ Todas las licitaciones en estado final, nada que procesar")
+        log.info(f"    Nada nuevo — {_fmt_dur((datetime.utcnow() - t0).total_seconds())}")
         return 0
 
     licitaciones_batch, items_batch = [], []
-    procesados = 0
+    procesados  = 0
+    total_a_proc = len(codigos_a_procesar)
 
-    for codigo in codigos_a_procesar:
+    def _flush_parcial(motivo: str):
+        upsert_batch(sb, "licitaciones",    licitaciones_batch, "codigo_externo")
+        upsert_batch(sb, "items_licitacion", items_batch, "licitacion_codigo,numero_linea")
+        req_usados = limiter.total_used() - req_inicio
+        log_fin(sb, fecha, "licitacion", "parcial", len(codigos), procesados, req_usados)
+        log.warning(
+            f"    PARCIAL ({motivo}) — {procesados}/{total_a_proc} guardadas"
+            f" | {req_usados} req | {_fmt_dur((datetime.utcnow()-t0).total_seconds())}"
+        )
+
+    for idx, codigo in enumerate(codigos_a_procesar, 1):
         if limiter.remaining() < 5:
-            log.warning("Requests casi agotados, guardando progreso parcial...")
-            upsert_batch(sb, "licitaciones", licitaciones_batch, "codigo_externo")
-            upsert_batch(sb, "items_licitacion", items_batch, "licitacion_codigo,numero_linea")
-            log_fin(sb, fecha, "licitacion", "parcial", len(codigos), procesados,
-                    limiter.total_used() - req_inicio)
+            _flush_parcial("requests agotados")
             return procesados
-
         if deadline and datetime.utcnow() >= deadline:
-            log.warning("Límite de tiempo de sesión — guardando lote actual...")
-            upsert_batch(sb, "licitaciones", licitaciones_batch, "codigo_externo")
-            upsert_batch(sb, "items_licitacion", items_batch, "licitacion_codigo,numero_linea")
-            log_fin(sb, fecha, "licitacion", "parcial", len(codigos), procesados,
-                    limiter.total_used() - req_inicio)
+            _flush_parcial("límite de tiempo")
             raise TiempoAgotado()
 
         raw = get_detalle("licitacion", codigo, limiter)
@@ -543,29 +574,43 @@ def procesar_dia_licitaciones(sb: Client, fecha: date, limiter: RateLimiter,
             items_batch.extend(items)
             procesados += 1
 
-        # Flush cada BATCH_SIZE
         if len(licitaciones_batch) >= BATCH_SIZE:
-            upsert_batch(sb, "licitaciones", licitaciones_batch, "codigo_externo")
+            upsert_batch(sb, "licitaciones",    licitaciones_batch, "codigo_externo")
             upsert_batch(sb, "items_licitacion", items_batch, "licitacion_codigo,numero_linea")
             licitaciones_batch.clear()
             items_batch.clear()
 
-    # Flush final
-    upsert_batch(sb, "licitaciones", licitaciones_batch, "codigo_externo")
+        if idx % 25 == 0 or idx == total_a_proc:
+            pct    = idx / total_a_proc * 100
+            elap   = (datetime.utcnow() - t0).total_seconds()
+            r_dia  = limiter.total_used() - req_inicio
+            eta    = _fmt_dur((elap / idx) * (total_a_proc - idx)) if idx > 0 else "?"
+            t_ses  = _fmt_dur((deadline - datetime.utcnow()).total_seconds()) if deadline else "∞"
+            log.info(
+                f"    [{_barra(idx, total_a_proc)}] {idx:>4}/{total_a_proc}"
+                f" ({pct:5.1f}%) | guardadas:{procesados:>5} | req:{r_dia:>5}"
+                f" | ETA día:{eta:>8} | sesión:{t_ses}"
+            )
+
+    upsert_batch(sb, "licitaciones",    licitaciones_batch, "codigo_externo")
     upsert_batch(sb, "items_licitacion", items_batch, "licitacion_codigo,numero_linea")
 
-    # Hoy nunca se marca completado — puede haber datos nuevos durante el día
+    elapsed  = (datetime.utcnow() - t0).total_seconds()
+    req_dia  = limiter.total_used() - req_inicio
     estado_final = "parcial" if fecha == date.today() else "completado"
-    log_fin(sb, fecha, "licitacion", estado_final, len(codigos), procesados,
-            limiter.total_used() - req_inicio)
-    log.info(f"  ✓ {procesados} licitaciones guardadas")
+    log_fin(sb, fecha, "licitacion", estado_final, len(codigos), procesados, req_dia)
+    etiqueta = "PARCIAL(hoy)" if estado_final == "parcial" else "OK"
+    log.info(
+        f"    {etiqueta} — {procesados}/{total_a_proc} guardadas"
+        f" | {len(skip)} skip | {req_dia} req | {_fmt_dur(elapsed)}"
+    )
     return procesados
 
 
 def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter,
                           deadline: Optional[datetime] = None) -> int:
     fecha_str = fecha.strftime("%d%m%Y")
-    log.info(f"[OC]  {fecha_str} — requests restantes: {limiter.remaining()}")
+    t0 = datetime.utcnow()
 
     log_inicio(sb, fecha, "orden_compra")
     req_inicio = limiter.total_used()
@@ -574,45 +619,48 @@ def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter,
     if not codigos:
         estado_final = "parcial" if fecha == date.today() else "completado"
         log_fin(sb, fecha, "orden_compra", estado_final, 0, 0, limiter.total_used() - req_inicio)
-        log.info("  → Sin órdenes para esta fecha")
+        log.info("    Sin órdenes en la API para esta fecha")
         return 0
 
     skip, actualizar = get_skip_codes(sb, "ordenes_compra", "codigo", "estado",
                                        codigos, ESTADOS_FINALES_OC)
     codigos_a_procesar = [c for c in codigos if c not in skip]
-    nuevos = len(codigos) - len(skip) - len(actualizar)
-    log.info(f"  → {len(codigos)} órdenes | {len(skip)} skip (estado final) "
-             f"| {len(actualizar)} a actualizar | {nuevos} nuevas")
+    n_nuevas = len(codigos) - len(skip) - len(actualizar)
+    log.info(
+        f"    API:{len(codigos):>5}  |  skip(final):{len(skip):>5}  |"
+        f"  actualizar:{len(actualizar):>5}  |  nuevas:{n_nuevas:>5}  |"
+        f"  a procesar:{len(codigos_a_procesar):>5}"
+    )
 
     if not codigos_a_procesar:
         estado_final = "parcial" if fecha == date.today() else "completado"
         log_fin(sb, fecha, "orden_compra", estado_final, len(codigos), 0, limiter.total_used() - req_inicio)
-        log.info("  ✓ Todas las órdenes en estado final, nada que procesar")
+        log.info(f"    Nada nuevo — {_fmt_dur((datetime.utcnow() - t0).total_seconds())}")
         return 0
 
     oc_batch, items_batch, compradores_batch, proveedores_batch = [], [], [], []
-    procesados = 0
+    procesados  = 0
+    total_a_proc = len(codigos_a_procesar)
     compradores_vistos, proveedores_vistos = set(), set()
 
-    for codigo in codigos_a_procesar:
-        if limiter.remaining() < 5:
-            log.warning("Requests casi agotados, guardando progreso parcial...")
-            upsert_batch(sb, "compradores",    compradores_batch, "rut_unidad")
-            upsert_batch(sb, "proveedores",    proveedores_batch, "rut_sucursal")
-            upsert_batch(sb, "ordenes_compra", oc_batch,          "codigo")
-            upsert_batch(sb, "items_orden_compra", items_batch,   "orden_codigo,numero_linea")
-            log_fin(sb, fecha, "orden_compra", "parcial", len(codigos), procesados,
-                    limiter.total_used() - req_inicio)
-            return procesados
+    def _flush_parcial(motivo: str):
+        upsert_batch(sb, "compradores",        compradores_batch, "rut_unidad")
+        upsert_batch(sb, "proveedores",        proveedores_batch, "rut_sucursal")
+        upsert_batch(sb, "ordenes_compra",     oc_batch,          "codigo")
+        upsert_batch(sb, "items_orden_compra", items_batch,       "orden_codigo,numero_linea")
+        req_usados = limiter.total_used() - req_inicio
+        log_fin(sb, fecha, "orden_compra", "parcial", len(codigos), procesados, req_usados)
+        log.warning(
+            f"    PARCIAL ({motivo}) — {procesados}/{total_a_proc} guardadas"
+            f" | {req_usados} req | {_fmt_dur((datetime.utcnow()-t0).total_seconds())}"
+        )
 
+    for idx, codigo in enumerate(codigos_a_procesar, 1):
+        if limiter.remaining() < 5:
+            _flush_parcial("requests agotados")
+            return procesados
         if deadline and datetime.utcnow() >= deadline:
-            log.warning("Límite de tiempo de sesión — guardando lote actual...")
-            upsert_batch(sb, "compradores",    compradores_batch, "rut_unidad")
-            upsert_batch(sb, "proveedores",    proveedores_batch, "rut_sucursal")
-            upsert_batch(sb, "ordenes_compra", oc_batch,          "codigo")
-            upsert_batch(sb, "items_orden_compra", items_batch,   "orden_codigo,numero_linea")
-            log_fin(sb, fecha, "orden_compra", "parcial", len(codigos), procesados,
-                    limiter.total_used() - req_inicio)
+            _flush_parcial("límite de tiempo")
             raise TiempoAgotado()
 
         raw = get_detalle("orden_compra", codigo, limiter)
@@ -628,12 +676,10 @@ def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter,
         if comprador and comprador["rut_unidad"] not in compradores_vistos:
             compradores_batch.append(comprador)
             compradores_vistos.add(comprador["rut_unidad"])
-
         if proveedor and proveedor["rut_sucursal"] not in proveedores_vistos:
             proveedores_batch.append(proveedor)
             proveedores_vistos.add(proveedor["rut_sucursal"])
 
-        # Flush cada BATCH_SIZE
         if len(oc_batch) >= BATCH_SIZE:
             upsert_batch(sb, "compradores",        compradores_batch, "rut_unidad")
             upsert_batch(sb, "proveedores",        proveedores_batch, "rut_sucursal")
@@ -642,16 +688,32 @@ def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter,
             oc_batch.clear(); items_batch.clear()
             compradores_batch.clear(); proveedores_batch.clear()
 
-    # Flush final
+        if idx % 25 == 0 or idx == total_a_proc:
+            pct   = idx / total_a_proc * 100
+            elap  = (datetime.utcnow() - t0).total_seconds()
+            r_dia = limiter.total_used() - req_inicio
+            eta   = _fmt_dur((elap / idx) * (total_a_proc - idx)) if idx > 0 else "?"
+            t_ses = _fmt_dur((deadline - datetime.utcnow()).total_seconds()) if deadline else "∞"
+            log.info(
+                f"    [{_barra(idx, total_a_proc)}] {idx:>4}/{total_a_proc}"
+                f" ({pct:5.1f}%) | guardadas:{procesados:>5} | req:{r_dia:>5}"
+                f" | ETA día:{eta:>8} | sesión:{t_ses}"
+            )
+
     upsert_batch(sb, "compradores",        compradores_batch, "rut_unidad")
     upsert_batch(sb, "proveedores",        proveedores_batch, "rut_sucursal")
     upsert_batch(sb, "ordenes_compra",     oc_batch,          "codigo")
     upsert_batch(sb, "items_orden_compra", items_batch,       "orden_codigo,numero_linea")
 
+    elapsed  = (datetime.utcnow() - t0).total_seconds()
+    req_dia  = limiter.total_used() - req_inicio
     estado_final = "parcial" if fecha == date.today() else "completado"
-    log_fin(sb, fecha, "orden_compra", estado_final, len(codigos), procesados,
-            limiter.total_used() - req_inicio)
-    log.info(f"  ✓ {procesados} órdenes de compra guardadas")
+    log_fin(sb, fecha, "orden_compra", estado_final, len(codigos), procesados, req_dia)
+    etiqueta = "PARCIAL(hoy)" if estado_final == "parcial" else "OK"
+    log.info(
+        f"    {etiqueta} — {procesados}/{total_a_proc} guardadas"
+        f" | {len(skip)} skip | {req_dia} req | {_fmt_dur(elapsed)}"
+    )
     return procesados
 
 
@@ -699,8 +761,9 @@ def _procesar_cola(
     deadline: Optional[datetime] = None,
 ):
     """Procesa una lista ordenada de (fecha, tipo) respetando el rate limit y el tiempo."""
+    W     = 60
     total = len(cola)
-    for i, (fecha, tipo) in enumerate(cola):
+    for i, (fecha, tipo) in enumerate(cola, 1):
         if limiter.remaining() < 5:
             log.warning("Requests agotados para esta sesión.")
             break
@@ -708,14 +771,22 @@ def _procesar_cola(
             log.warning(f"Límite de sesión alcanzado ({max_req:,} requests). Deteniendo.")
             break
         if deadline and datetime.utcnow() >= deadline:
-            log.warning(f"Límite de tiempo alcanzado antes de iniciar [{i+1}/{total}]. Deteniendo.")
+            log.warning(f"Límite de tiempo alcanzado antes de [{i}/{total}]. Deteniendo.")
             break
 
-        log.info(f"\n{'─'*50}")
+        t_ses  = _fmt_dur((deadline - datetime.utcnow()).total_seconds()) if deadline else "∞"
+        label  = "LIC" if tipo == "licitacion" else " OC"
+        pct_cola = (i - 1) / total * 100
+        log.info(f"\n{'─' * W}")
         log.info(
-            f"[{i+1}/{total}] {fecha.strftime('%d/%m/%Y')} | {tipo} "
-            f"| usados: {limiter.total_used():,} | restantes: {limiter.remaining():,}"
+            f"  [{_barra(i-1, total, 8)}] {i:>4}/{total} ({pct_cola:4.1f}%)"
+            f"  {fecha.strftime('%d/%m/%Y')}  {label}"
         )
+        log.info(
+            f"  usados:{limiter.total_used():>7,} | restantes:{limiter.remaining():>7,}"
+            f" | tiempo sesión: {t_ses}"
+        )
+        log.info(f"{'─' * W}")
 
         try:
             if tipo == "licitacion":
@@ -734,15 +805,23 @@ def main():
         log.error("SUPABASE_SERVICE_ROLE_KEY no está configurada. Copia .env.example → .env")
         sys.exit(1)
 
-    max_req  = args.max_requests or (MAX_REQUESTS_DAY * len(TICKETS))
-    sb       = create_client(SUPABASE_URL, SUPABASE_KEY)
-    limiter  = RateLimiter(TICKETS, MAX_REQUESTS_DAY)
-    deadline = datetime.utcnow() + timedelta(seconds=SESSION_LIMIT_SECONDS)
+    max_req       = args.max_requests or (MAX_REQUESTS_DAY * len(TICKETS))
+    sb            = create_client(SUPABASE_URL, SUPABASE_KEY)
+    limiter       = RateLimiter(TICKETS, MAX_REQUESTS_DAY)
+    inicio_sesion = datetime.utcnow()
+    deadline      = inicio_sesion + timedelta(seconds=SESSION_LIMIT_SECONDS)
 
-    log.info(f"\n{'═'*50}")
-    log.info(f"Modo: {args.modo.upper()} | Max requests sesión: {max_req:,}")
-    log.info(f"Límite de tiempo: {deadline.strftime('%Y-%m-%d %H:%M:%S')} UTC "
-             f"({SESSION_LIMIT_SECONDS // 3600}h {(SESSION_LIMIT_SECONDS % 3600) // 60}m)")
+    W = 60
+    log.info("═" * W)
+    log.info("  EXTRACTOR MERCADO PÚBLICO → SUPABASE")
+    log.info("─" * W)
+    log.info(f"  Modo:      {args.modo.upper():<10}  Solo: {args.solo or 'ambos'}")
+    log.info(f"  Tickets:   {len(TICKETS)} configurados  (cap: {len(TICKETS)*MAX_REQUESTS_DAY:,} req/día)")
+    log.info(f"  Max req:   {max_req:,}")
+    log.info(f"  Inicio:    {inicio_sesion.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    log.info(f"  Deadline:  {deadline.strftime('%Y-%m-%d %H:%M:%S')} UTC  "
+             f"({SESSION_LIMIT_SECONDS//3600}h {(SESSION_LIMIT_SECONDS%3600)//60}m)")
+    log.info("═" * W)
 
     try:
         if args.modo == "auto":
@@ -799,10 +878,16 @@ def main():
         log.error(f"\n⚠️  {e}")
         sys.exit(1)
 
-    log.info(f"\n{'═'*50}")
-    log.info(f"Sesión finalizada. Total requests usados: {limiter.total_used():,}")
+    elapsed_total = (datetime.utcnow() - inicio_sesion).total_seconds()
+    log.info("\n" + "═" * W)
+    log.info("  SESIÓN FINALIZADA")
+    log.info("─" * W)
+    log.info(f"  Tiempo total:    {_fmt_dur(elapsed_total)}")
+    log.info(f"  Requests usados: {limiter.total_used():,} / {max_req:,}")
     for i, count in enumerate(limiter.counts):
-        log.info(f"  Ticket {i + 1}: {count:,} requests")
+        pct_t = count / MAX_REQUESTS_DAY * 100
+        log.info(f"    Ticket {i+1}: {count:>6,} req  ({pct_t:.1f}% del límite diario)")
+    log.info("═" * W)
 
 
 if __name__ == "__main__":
