@@ -79,6 +79,11 @@ ESTADO_OC  = {4: "Enviada a Proveedor", 5: "En proceso", 6: "Aceptada", 9: "Canc
                12: "Recepción Conforme", 13: "Pendiente de Recepcionar",
                14: "Recepcionada Parcialmente", 15: "Recepcion Conforme Incompleta"}
 
+# Estados que indican que el registro no cambiará más → se salta con seguridad sin re-fetchear
+# Los registros con estado no-final se re-descargan para capturar cambios (ej: adjudicación)
+ESTADOS_FINALES_LIC = {7, 8, 18, 19}   # Desierta, Adjudicada, Revocada, Suspendida
+ESTADOS_FINALES_OC  = {9, 12}           # Cancelada, Recepción Conforme
+
 # ─────────────────────────────────────────────
 # Logging
 # ─────────────────────────────────────────────
@@ -355,17 +360,31 @@ def upsert_batch(sb: Client, tabla: str, registros: list[dict], conflict_col: st
             log.error(f"Error al guardar en {tabla}: {e}")
 
 
-def get_existing_codes(sb: Client, tabla: str, col: str, codigos: list[str]) -> set[str]:
-    """Consulta en batch qué códigos ya existen en Supabase para evitar requests innecesarios."""
+def get_skip_codes(sb: Client, tabla: str, col_codigo: str, col_estado: str,
+                   codigos: list[str], estados_finales: set[int]) -> tuple[set[str], set[str]]:
+    """
+    Consulta en batch el estado de los códigos en Supabase.
+    Retorna (skip, actualizar):
+      - skip:      existen en BD con estado final → no re-fetchear
+      - actualizar: existen en BD con estado no-final → re-fetchear para capturar cambios
+    Los códigos que no están en BD quedan fuera de ambos sets (son nuevos).
+    """
     if not codigos:
-        return set()
-    existing: set[str] = set()
-    chunk_size = 300  # Evita URLs demasiado largas en el filtro IN
+        return set(), set()
+    skip: set[str] = set()
+    actualizar: set[str] = set()
+    chunk_size = 300
     for i in range(0, len(codigos), chunk_size):
         chunk = codigos[i : i + chunk_size]
-        res = sb.table(tabla).select(col).in_(col, chunk).execute()
-        existing.update(row[col] for row in (res.data or []))
-    return existing
+        res = sb.table(tabla).select(f"{col_codigo},{col_estado}").in_(col_codigo, chunk).execute()
+        for row in (res.data or []):
+            codigo = row[col_codigo]
+            estado = row.get(col_estado)
+            if estado in estados_finales:
+                skip.add(codigo)
+            else:
+                actualizar.add(codigo)
+    return skip, actualizar
 
 
 def log_inicio(sb: Client, fecha: date, tipo: str):
@@ -481,24 +500,27 @@ def procesar_dia_licitaciones(sb: Client, fecha: date, limiter: RateLimiter,
         log.info("  → Sin licitaciones para esta fecha")
         return 0
 
-    existing = get_existing_codes(sb, "licitaciones", "codigo_externo", codigos)
-    codigos_nuevos = [c for c in codigos if c not in existing]
-    log.info(f"  → {len(codigos)} licitaciones | {len(existing)} ya en BD | {len(codigos_nuevos)} nuevas")
+    skip, actualizar = get_skip_codes(sb, "licitaciones", "codigo_externo", "estado",
+                                       codigos, ESTADOS_FINALES_LIC)
+    codigos_a_procesar = [c for c in codigos if c not in skip]
+    nuevos = len(codigos) - len(skip) - len(actualizar)
+    log.info(f"  → {len(codigos)} licitaciones | {len(skip)} skip (estado final) "
+             f"| {len(actualizar)} a actualizar | {nuevos} nuevas")
 
-    if not codigos_nuevos:
+    if not codigos_a_procesar:
         estado_final = "parcial" if fecha == date.today() else "completado"
         log_fin(sb, fecha, "licitacion", estado_final, len(codigos), 0, limiter.total_used() - req_inicio)
-        log.info("  ✓ Todas las licitaciones ya estaban en BD")
+        log.info("  ✓ Todas las licitaciones en estado final, nada que procesar")
         return 0
 
     licitaciones_batch, items_batch = [], []
     procesados = 0
 
-    for codigo in codigos_nuevos:
+    for codigo in codigos_a_procesar:
         if limiter.remaining() < 5:
             log.warning("Requests casi agotados, guardando progreso parcial...")
             upsert_batch(sb, "licitaciones", licitaciones_batch, "codigo_externo")
-            upsert_batch(sb, "items_licitacion", items_batch, "id")
+            upsert_batch(sb, "items_licitacion", items_batch, "licitacion_codigo,numero_linea")
             log_fin(sb, fecha, "licitacion", "parcial", len(codigos), procesados,
                     limiter.total_used() - req_inicio)
             return procesados
@@ -506,7 +528,7 @@ def procesar_dia_licitaciones(sb: Client, fecha: date, limiter: RateLimiter,
         if deadline and datetime.utcnow() >= deadline:
             log.warning("Límite de tiempo de sesión — guardando lote actual...")
             upsert_batch(sb, "licitaciones", licitaciones_batch, "codigo_externo")
-            upsert_batch(sb, "items_licitacion", items_batch, "id")
+            upsert_batch(sb, "items_licitacion", items_batch, "licitacion_codigo,numero_linea")
             log_fin(sb, fecha, "licitacion", "parcial", len(codigos), procesados,
                     limiter.total_used() - req_inicio)
             raise TiempoAgotado()
@@ -524,13 +546,13 @@ def procesar_dia_licitaciones(sb: Client, fecha: date, limiter: RateLimiter,
         # Flush cada BATCH_SIZE
         if len(licitaciones_batch) >= BATCH_SIZE:
             upsert_batch(sb, "licitaciones", licitaciones_batch, "codigo_externo")
-            upsert_batch(sb, "items_licitacion", items_batch, "id")
+            upsert_batch(sb, "items_licitacion", items_batch, "licitacion_codigo,numero_linea")
             licitaciones_batch.clear()
             items_batch.clear()
 
     # Flush final
     upsert_batch(sb, "licitaciones", licitaciones_batch, "codigo_externo")
-    upsert_batch(sb, "items_licitacion", items_batch, "id")
+    upsert_batch(sb, "items_licitacion", items_batch, "licitacion_codigo,numero_linea")
 
     # Hoy nunca se marca completado — puede haber datos nuevos durante el día
     estado_final = "parcial" if fecha == date.today() else "completado"
@@ -555,27 +577,30 @@ def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter,
         log.info("  → Sin órdenes para esta fecha")
         return 0
 
-    existing = get_existing_codes(sb, "ordenes_compra", "codigo", codigos)
-    codigos_nuevos = [c for c in codigos if c not in existing]
-    log.info(f"  → {len(codigos)} órdenes | {len(existing)} ya en BD | {len(codigos_nuevos)} nuevas")
+    skip, actualizar = get_skip_codes(sb, "ordenes_compra", "codigo", "estado",
+                                       codigos, ESTADOS_FINALES_OC)
+    codigos_a_procesar = [c for c in codigos if c not in skip]
+    nuevos = len(codigos) - len(skip) - len(actualizar)
+    log.info(f"  → {len(codigos)} órdenes | {len(skip)} skip (estado final) "
+             f"| {len(actualizar)} a actualizar | {nuevos} nuevas")
 
-    if not codigos_nuevos:
+    if not codigos_a_procesar:
         estado_final = "parcial" if fecha == date.today() else "completado"
         log_fin(sb, fecha, "orden_compra", estado_final, len(codigos), 0, limiter.total_used() - req_inicio)
-        log.info("  ✓ Todas las órdenes ya estaban en BD")
+        log.info("  ✓ Todas las órdenes en estado final, nada que procesar")
         return 0
 
     oc_batch, items_batch, compradores_batch, proveedores_batch = [], [], [], []
     procesados = 0
     compradores_vistos, proveedores_vistos = set(), set()
 
-    for codigo in codigos_nuevos:
+    for codigo in codigos_a_procesar:
         if limiter.remaining() < 5:
             log.warning("Requests casi agotados, guardando progreso parcial...")
             upsert_batch(sb, "compradores",    compradores_batch, "rut_unidad")
             upsert_batch(sb, "proveedores",    proveedores_batch, "rut_sucursal")
             upsert_batch(sb, "ordenes_compra", oc_batch,          "codigo")
-            upsert_batch(sb, "items_orden_compra", items_batch,   "id")
+            upsert_batch(sb, "items_orden_compra", items_batch,   "orden_codigo,numero_linea")
             log_fin(sb, fecha, "orden_compra", "parcial", len(codigos), procesados,
                     limiter.total_used() - req_inicio)
             return procesados
@@ -585,7 +610,7 @@ def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter,
             upsert_batch(sb, "compradores",    compradores_batch, "rut_unidad")
             upsert_batch(sb, "proveedores",    proveedores_batch, "rut_sucursal")
             upsert_batch(sb, "ordenes_compra", oc_batch,          "codigo")
-            upsert_batch(sb, "items_orden_compra", items_batch,   "id")
+            upsert_batch(sb, "items_orden_compra", items_batch,   "orden_codigo,numero_linea")
             log_fin(sb, fecha, "orden_compra", "parcial", len(codigos), procesados,
                     limiter.total_used() - req_inicio)
             raise TiempoAgotado()
@@ -613,7 +638,7 @@ def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter,
             upsert_batch(sb, "compradores",        compradores_batch, "rut_unidad")
             upsert_batch(sb, "proveedores",        proveedores_batch, "rut_sucursal")
             upsert_batch(sb, "ordenes_compra",     oc_batch,          "codigo")
-            upsert_batch(sb, "items_orden_compra", items_batch,       "id")
+            upsert_batch(sb, "items_orden_compra", items_batch,       "orden_codigo,numero_linea")
             oc_batch.clear(); items_batch.clear()
             compradores_batch.clear(); proveedores_batch.clear()
 
@@ -621,7 +646,7 @@ def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter,
     upsert_batch(sb, "compradores",        compradores_batch, "rut_unidad")
     upsert_batch(sb, "proveedores",        proveedores_batch, "rut_sucursal")
     upsert_batch(sb, "ordenes_compra",     oc_batch,          "codigo")
-    upsert_batch(sb, "items_orden_compra", items_batch,       "id")
+    upsert_batch(sb, "items_orden_compra", items_batch,       "orden_codigo,numero_linea")
 
     estado_final = "parcial" if fecha == date.today() else "completado"
     log_fin(sb, fecha, "orden_compra", estado_final, len(codigos), procesados,
