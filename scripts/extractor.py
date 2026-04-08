@@ -70,7 +70,8 @@ MAX_REQUESTS_DAY = 10_000        # Hard limit por ticket (total = tickets × 10.
 REQUEST_DELAY    = 0.3           # Segundos entre requests (evita saturar la API)
 RETRY_MAX        = 3             # Reintentos ante error de red
 RETRY_BACKOFF    = 5             # Segundos de espera base para retry
-BATCH_SIZE       = 10            # Registros por upsert a Supabase
+BATCH_SIZE            = 10            # Registros por upsert a Supabase
+SESSION_LIMIT_SECONDS = 5 * 3600 + 30 * 60  # 5h 30m — margen antes del límite de GitHub Actions (6h)
 
 # Mapas de estado
 ESTADO_LIC = {5: "Publicada", 6: "Cerrada", 7: "Desierta", 8: "Adjudicada", 18: "Revocada", 19: "Suspendida"}
@@ -92,58 +93,61 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+class TiempoAgotado(Exception):
+    """Señal de parada limpia: la sesión alcanzó el límite de tiempo configurado."""
+    pass
+
+
 # ─────────────────────────────────────────────
 # Rate Limiter con rotación de tickets
 # ─────────────────────────────────────────────
 class RateLimiter:
     """
-    Rota entre múltiples tickets automáticamente.
+    Rota entre múltiples tickets en round-robin estricto.
     Cada ticket tiene su propio contador de 10.000 requests/día.
     Total disponible = len(tickets) × 10.000.
     """
     def __init__(self, tickets: list[str], max_per_ticket: int):
         if not tickets:
             raise ValueError("Se necesita al menos 1 ticket configurado en .env")
-        self.tickets         = tickets
-        self.max_per_ticket  = max_per_ticket
-        self.counts          = [0] * len(tickets)
-        self.current         = 0
+        self.tickets        = tickets
+        self.max_per_ticket = max_per_ticket
+        self.counts         = [0] * len(tickets)
+        self._call_idx      = 0  # puntero round-robin
         log.info(f"Tickets configurados: {len(tickets)} — capacidad total: {len(tickets) * max_per_ticket:,} requests/día")
 
-    def current_ticket(self) -> str:
-        return self.tickets[self.current]
-
-    def tick(self):
-        self.counts[self.current] += 1
-        if self.counts[self.current] >= self.max_per_ticket:
-            if self.current + 1 < len(self.tickets):
-                log.warning(f"Ticket {self.current + 1} agotado → rotando al ticket {self.current + 2}")
-                self.current += 1
-            else:
-                raise RuntimeError(
-                    f"Todos los tickets agotados ({self.total_used():,} requests usados). "
-                    "Detención preventiva."
-                )
+    def get_and_tick(self) -> str:
+        """Devuelve el próximo ticket disponible (round-robin) e incrementa su contador."""
+        n = len(self.tickets)
+        for offset in range(n):
+            idx = (self._call_idx + offset) % n
+            if self.counts[idx] < self.max_per_ticket:
+                self.counts[idx] += 1
+                if self.counts[idx] == self.max_per_ticket:
+                    log.warning(f"Ticket {idx + 1} agotado ({self.max_per_ticket:,} requests)")
+                self._call_idx = (idx + 1) % n
+                return self.tickets[idx]
+        raise RuntimeError(
+            f"Todos los tickets agotados ({self.total_used():,} requests usados). "
+            "Detención preventiva."
+        )
 
     def total_used(self) -> int:
         return sum(self.counts)
 
     def remaining(self) -> int:
-        remaining_current = self.max_per_ticket - self.counts[self.current]
-        remaining_future  = (len(self.tickets) - self.current - 1) * self.max_per_ticket
-        return remaining_current + remaining_future
+        return sum(max(0, self.max_per_ticket - c) for c in self.counts)
 
 
 # ─────────────────────────────────────────────
 # HTTP helpers
 # ─────────────────────────────────────────────
 def _get(url: str, params: dict, limiter: RateLimiter) -> Optional[dict]:
-    """GET con reintentos y rate limiting."""
-    params["ticket"] = limiter.current_ticket()
+    """GET con reintentos y rate limiting round-robin."""
     for intento in range(1, RETRY_MAX + 1):
         try:
-            limiter.tick()
-            resp = requests.get(url, params=params, headers=HEADERS, timeout=90)
+            ticket = limiter.get_and_tick()
+            resp = requests.get(url, params={**params, "ticket": ticket}, headers=HEADERS, timeout=90)
             time.sleep(REQUEST_DELAY)
 
             if resp.status_code == 404:
@@ -351,6 +355,19 @@ def upsert_batch(sb: Client, tabla: str, registros: list[dict], conflict_col: st
             log.error(f"Error al guardar en {tabla}: {e}")
 
 
+def get_existing_codes(sb: Client, tabla: str, col: str, codigos: list[str]) -> set[str]:
+    """Consulta en batch qué códigos ya existen en Supabase para evitar requests innecesarios."""
+    if not codigos:
+        return set()
+    existing: set[str] = set()
+    chunk_size = 300  # Evita URLs demasiado largas en el filtro IN
+    for i in range(0, len(codigos), chunk_size):
+        chunk = codigos[i : i + chunk_size]
+        res = sb.table(tabla).select(col).in_(col, chunk).execute()
+        existing.update(row[col] for row in (res.data or []))
+    return existing
+
+
 def log_inicio(sb: Client, fecha: date, tipo: str):
     sb.table("extraccion_log").upsert(
         {"fecha": fecha.isoformat(), "tipo": tipo, "estado": "pendiente"},
@@ -449,7 +466,8 @@ def generar_cola_auto(
 # ─────────────────────────────────────────────
 # Lógica principal por día
 # ─────────────────────────────────────────────
-def procesar_dia_licitaciones(sb: Client, fecha: date, limiter: RateLimiter) -> int:
+def procesar_dia_licitaciones(sb: Client, fecha: date, limiter: RateLimiter,
+                               deadline: Optional[datetime] = None) -> int:
     fecha_str = fecha.strftime("%d%m%Y")
     log.info(f"[LIC] {fecha_str} — requests restantes: {limiter.remaining()}")
 
@@ -457,12 +475,26 @@ def procesar_dia_licitaciones(sb: Client, fecha: date, limiter: RateLimiter) -> 
     req_inicio = limiter.total_used()
 
     codigos = get_codigos_por_fecha("licitacion", fecha_str, limiter)
-    log.info(f"  → {len(codigos)} licitaciones encontradas")
+    if not codigos:
+        estado_final = "parcial" if fecha == date.today() else "completado"
+        log_fin(sb, fecha, "licitacion", estado_final, 0, 0, limiter.total_used() - req_inicio)
+        log.info("  → Sin licitaciones para esta fecha")
+        return 0
+
+    existing = get_existing_codes(sb, "licitaciones", "codigo_externo", codigos)
+    codigos_nuevos = [c for c in codigos if c not in existing]
+    log.info(f"  → {len(codigos)} licitaciones | {len(existing)} ya en BD | {len(codigos_nuevos)} nuevas")
+
+    if not codigos_nuevos:
+        estado_final = "parcial" if fecha == date.today() else "completado"
+        log_fin(sb, fecha, "licitacion", estado_final, len(codigos), 0, limiter.total_used() - req_inicio)
+        log.info("  ✓ Todas las licitaciones ya estaban en BD")
+        return 0
 
     licitaciones_batch, items_batch = [], []
     procesados = 0
 
-    for codigo in codigos:
+    for codigo in codigos_nuevos:
         if limiter.remaining() < 5:
             log.warning("Requests casi agotados, guardando progreso parcial...")
             upsert_batch(sb, "licitaciones", licitaciones_batch, "codigo_externo")
@@ -470,6 +502,14 @@ def procesar_dia_licitaciones(sb: Client, fecha: date, limiter: RateLimiter) -> 
             log_fin(sb, fecha, "licitacion", "parcial", len(codigos), procesados,
                     limiter.total_used() - req_inicio)
             return procesados
+
+        if deadline and datetime.utcnow() >= deadline:
+            log.warning("Límite de tiempo de sesión — guardando lote actual...")
+            upsert_batch(sb, "licitaciones", licitaciones_batch, "codigo_externo")
+            upsert_batch(sb, "items_licitacion", items_batch, "id")
+            log_fin(sb, fecha, "licitacion", "parcial", len(codigos), procesados,
+                    limiter.total_used() - req_inicio)
+            raise TiempoAgotado()
 
         raw = get_detalle("licitacion", codigo, limiter)
         if not raw:
@@ -500,7 +540,8 @@ def procesar_dia_licitaciones(sb: Client, fecha: date, limiter: RateLimiter) -> 
     return procesados
 
 
-def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter) -> int:
+def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter,
+                          deadline: Optional[datetime] = None) -> int:
     fecha_str = fecha.strftime("%d%m%Y")
     log.info(f"[OC]  {fecha_str} — requests restantes: {limiter.remaining()}")
 
@@ -508,13 +549,27 @@ def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter) -> int:
     req_inicio = limiter.total_used()
 
     codigos = get_codigos_por_fecha("orden_compra", fecha_str, limiter)
-    log.info(f"  → {len(codigos)} órdenes encontradas")
+    if not codigos:
+        estado_final = "parcial" if fecha == date.today() else "completado"
+        log_fin(sb, fecha, "orden_compra", estado_final, 0, 0, limiter.total_used() - req_inicio)
+        log.info("  → Sin órdenes para esta fecha")
+        return 0
+
+    existing = get_existing_codes(sb, "ordenes_compra", "codigo", codigos)
+    codigos_nuevos = [c for c in codigos if c not in existing]
+    log.info(f"  → {len(codigos)} órdenes | {len(existing)} ya en BD | {len(codigos_nuevos)} nuevas")
+
+    if not codigos_nuevos:
+        estado_final = "parcial" if fecha == date.today() else "completado"
+        log_fin(sb, fecha, "orden_compra", estado_final, len(codigos), 0, limiter.total_used() - req_inicio)
+        log.info("  ✓ Todas las órdenes ya estaban en BD")
+        return 0
 
     oc_batch, items_batch, compradores_batch, proveedores_batch = [], [], [], []
     procesados = 0
     compradores_vistos, proveedores_vistos = set(), set()
 
-    for codigo in codigos:
+    for codigo in codigos_nuevos:
         if limiter.remaining() < 5:
             log.warning("Requests casi agotados, guardando progreso parcial...")
             upsert_batch(sb, "compradores",    compradores_batch, "rut_unidad")
@@ -524,6 +579,16 @@ def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter) -> int:
             log_fin(sb, fecha, "orden_compra", "parcial", len(codigos), procesados,
                     limiter.total_used() - req_inicio)
             return procesados
+
+        if deadline and datetime.utcnow() >= deadline:
+            log.warning("Límite de tiempo de sesión — guardando lote actual...")
+            upsert_batch(sb, "compradores",    compradores_batch, "rut_unidad")
+            upsert_batch(sb, "proveedores",    proveedores_batch, "rut_sucursal")
+            upsert_batch(sb, "ordenes_compra", oc_batch,          "codigo")
+            upsert_batch(sb, "items_orden_compra", items_batch,   "id")
+            log_fin(sb, fecha, "orden_compra", "parcial", len(codigos), procesados,
+                    limiter.total_used() - req_inicio)
+            raise TiempoAgotado()
 
         raw = get_detalle("orden_compra", codigo, limiter)
         if not raw:
@@ -606,12 +671,19 @@ def _procesar_cola(
     limiter: RateLimiter,
     cola: list[tuple[date, str]],
     max_req: int,
+    deadline: Optional[datetime] = None,
 ):
-    """Procesa una lista ordenada de (fecha, tipo) respetando el rate limit."""
+    """Procesa una lista ordenada de (fecha, tipo) respetando el rate limit y el tiempo."""
     total = len(cola)
     for i, (fecha, tipo) in enumerate(cola):
         if limiter.remaining() < 5:
             log.warning("Requests agotados para esta sesión.")
+            break
+        if limiter.total_used() >= max_req:
+            log.warning(f"Límite de sesión alcanzado ({max_req:,} requests). Deteniendo.")
+            break
+        if deadline and datetime.utcnow() >= deadline:
+            log.warning(f"Límite de tiempo alcanzado antes de iniciar [{i+1}/{total}]. Deteniendo.")
             break
 
         log.info(f"\n{'─'*50}")
@@ -620,10 +692,14 @@ def _procesar_cola(
             f"| usados: {limiter.total_used():,} | restantes: {limiter.remaining():,}"
         )
 
-        if tipo == "licitacion":
-            procesar_dia_licitaciones(sb, fecha, limiter)
-        else:
-            procesar_dia_ordenes(sb, fecha, limiter)
+        try:
+            if tipo == "licitacion":
+                procesar_dia_licitaciones(sb, fecha, limiter, deadline)
+            else:
+                procesar_dia_ordenes(sb, fecha, limiter, deadline)
+        except TiempoAgotado:
+            log.warning("Sesión detenida por límite de tiempo. Progreso guardado en extraccion_log.")
+            break
 
 
 def main():
@@ -633,12 +709,15 @@ def main():
         log.error("SUPABASE_SERVICE_ROLE_KEY no está configurada. Copia .env.example → .env")
         sys.exit(1)
 
-    max_req = args.max_requests or (MAX_REQUESTS_DAY * len(TICKETS))
-    sb      = create_client(SUPABASE_URL, SUPABASE_KEY)
-    limiter = RateLimiter(TICKETS, MAX_REQUESTS_DAY)
+    max_req  = args.max_requests or (MAX_REQUESTS_DAY * len(TICKETS))
+    sb       = create_client(SUPABASE_URL, SUPABASE_KEY)
+    limiter  = RateLimiter(TICKETS, MAX_REQUESTS_DAY)
+    deadline = datetime.utcnow() + timedelta(seconds=SESSION_LIMIT_SECONDS)
 
     log.info(f"\n{'═'*50}")
     log.info(f"Modo: {args.modo.upper()} | Max requests sesión: {max_req:,}")
+    log.info(f"Límite de tiempo: {deadline.strftime('%Y-%m-%d %H:%M:%S')} UTC "
+             f"({SESSION_LIMIT_SECONDS // 3600}h {(SESSION_LIMIT_SECONDS % 3600) // 60}m)")
 
     try:
         if args.modo == "auto":
@@ -656,7 +735,7 @@ def main():
                 log.info("No hay fechas pendientes. Base de datos al día.")
                 return
 
-            _procesar_cola(sb, limiter, cola, max_req)
+            _procesar_cola(sb, limiter, cola, max_req, deadline)
 
         else:
             # ── Modo manual: rango explícito ───────────────────────────
@@ -689,7 +768,7 @@ def main():
                         cola.append((fecha, "orden_compra"))
                 fecha += timedelta(days=1)
 
-            _procesar_cola(sb, limiter, cola, max_req)
+            _procesar_cola(sb, limiter, cola, max_req, deadline)
 
     except RuntimeError as e:
         log.error(f"\n⚠️  {e}")
@@ -697,6 +776,8 @@ def main():
 
     log.info(f"\n{'═'*50}")
     log.info(f"Sesión finalizada. Total requests usados: {limiter.total_used():,}")
+    for i, count in enumerate(limiter.counts):
+        log.info(f"  Ticket {i + 1}: {count:,} requests")
 
 
 if __name__ == "__main__":
