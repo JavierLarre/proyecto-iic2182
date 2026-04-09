@@ -245,9 +245,19 @@ def _parse_fecha(val: Optional[str]) -> Optional[str]:
     """Convierte fecha de la API (ISO o dd/mm/aaaa) a ISO 8601."""
     if not val:
         return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%Y-%m-%d"):
+    # Normalizar milisegundos: la API devuelve 1 a 7 dígitos fraccionarios,
+    # pero %f de Python solo acepta exactamente 6. Truncamos a 6.
+    import re as _re
+    val_norm = _re.sub(r'(\.\d{1,6})\d*$', lambda m: m.group(1).ljust(7, '0')[:7], val)
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%f",  # ISO con milisegundos (caso más común en la API)
+        "%Y-%m-%dT%H:%M:%S",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y",
+        "%Y-%m-%d",
+    ):
         try:
-            return datetime.strptime(val, fmt).isoformat()
+            return datetime.strptime(val_norm, fmt).isoformat()
         except ValueError:
             continue
     return None
@@ -259,6 +269,7 @@ def parse_licitacion(raw: dict) -> tuple[dict, list[dict]]:
     """
     comp = raw.get("Comprador", {}) or {}
     items_raw = (raw.get("Items", {}) or {}).get("Listado", []) or []
+    fechas = raw.get("Fechas", {}) or {}
 
     licitacion = {
         "codigo_externo":     raw.get("CodigoExterno"),
@@ -269,9 +280,10 @@ def parse_licitacion(raw: dict) -> tuple[dict, list[dict]]:
         "tipo_licitacion":    raw.get("Tipo"),
         "monto_estimado":     _safe_float(raw.get("MontoEstimado")),
         "unidad_monetaria":   raw.get("Moneda"),
-        "fecha_publicacion":  _parse_fecha(raw.get("FechaPublicacion")),
-        "fecha_cierre":       _parse_fecha(raw.get("FechaCierre")),
-        "fecha_adjudicacion": _parse_fecha(raw.get("FechaAdjudicacion")),
+        # Las fechas están siempre bajo el objeto "Fechas", no en la raíz
+        "fecha_publicacion":  _parse_fecha(fechas.get("FechaPublicacion")),
+        "fecha_cierre":       _parse_fecha(fechas.get("FechaCierre")),
+        "fecha_adjudicacion": _parse_fecha(fechas.get("FechaAdjudicacion")),
         "comprador_rut":      comp.get("RutUnidad"),
         "comprador_nombre":   comp.get("NombreOrganismo"),
         "comprador_region":   comp.get("RegionUnidad"),
@@ -306,6 +318,7 @@ def parse_orden_compra(raw: dict) -> tuple[dict, list[dict], Optional[dict], Opt
     comp = raw.get("Comprador", {}) or {}
     prov = raw.get("Proveedor", {}) or {}
     items_raw = (raw.get("Items", {}) or {}).get("Listado", []) or []
+    fechas = raw.get("Fechas", {}) or {}
 
     oc = {
         "codigo":            raw.get("Codigo"),
@@ -314,9 +327,11 @@ def parse_orden_compra(raw: dict) -> tuple[dict, list[dict], Optional[dict], Opt
         "estado_texto":      ESTADO_OC.get(_safe_int(raw.get("CodigoEstado")), raw.get("Estado")),
         "total":             _safe_float(raw.get("Total")),
         "total_neto":        _safe_float(raw.get("TotalNeto")),
-        "unidad_monetaria":  raw.get("Moneda"),
-        "fecha_creacion":    _parse_fecha(raw.get("FechaCreacion")),
-        "fecha_envio":       _parse_fecha(raw.get("FechaEnvio")),
+        # OC usa "TipoMoneda", no "Moneda"
+        "unidad_monetaria":  raw.get("TipoMoneda") or raw.get("Moneda"),
+        # Las fechas están bajo el objeto "Fechas", no en la raíz
+        "fecha_creacion":    _parse_fecha(fechas.get("FechaCreacion")),
+        "fecha_envio":       _parse_fecha(fechas.get("FechaEnvio")),
         "comprador_rut":     comp.get("RutUnidad"),
         "comprador_nombre":  comp.get("NombreOrganismo"),
         "comprador_region":  comp.get("RegionUnidad"),
@@ -325,7 +340,8 @@ def parse_orden_compra(raw: dict) -> tuple[dict, list[dict], Optional[dict], Opt
         "proveedor_nombre":  prov.get("Nombre"),
         "proveedor_region":  prov.get("Region"),
         "proveedor_comuna":  prov.get("Comuna"),
-        "licitacion_codigo": raw.get("CodigoLicitacion"),
+        # Normalizar string vacío a None para evitar FK inválidas
+        "licitacion_codigo": raw.get("CodigoLicitacion") or None,
         "raw_data":          raw,
     }
 
@@ -334,11 +350,14 @@ def parse_orden_compra(raw: dict) -> tuple[dict, list[dict], Optional[dict], Opt
         items.append({
             "orden_codigo":          oc["codigo"],
             "numero_linea":          _safe_int(it.get("Correlativo")),
+            # OC items usan "Producto", licitaciones usan "NombreProducto"
             "nombre_producto":       it.get("NombreProducto") or it.get("Producto"),
-            "descripcion":           it.get("Descripcion"),
-            "categoria":             it.get("CodigoCategoria") or it.get("Categoria"),
+            "descripcion":           it.get("Descripcion") or it.get("EspecificacionComprador"),
+            # Preferir texto de categoría sobre el código numérico
+            "categoria":             it.get("Categoria") or it.get("CodigoCategoria"),
             "cantidad":              _safe_float(it.get("Cantidad")),
-            "unidad_medida":         it.get("UnidadMedida"),
+            # OC items usan "Unidad", licitaciones usan "UnidadMedida"
+            "unidad_medida":         it.get("UnidadMedida") or it.get("Unidad"),
             "precio_neto_unitario":  _safe_float(it.get("PrecioNeto")),
             "precio_total":          _safe_float(it.get("Total")),
         })
