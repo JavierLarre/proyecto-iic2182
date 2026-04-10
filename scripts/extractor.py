@@ -70,7 +70,9 @@ MAX_REQUESTS_DAY = 10_000        # Hard limit por ticket (total = tickets × 10.
 REQUEST_DELAY    = 0.3           # Segundos entre requests (evita saturar la API)
 RETRY_MAX        = 3             # Reintentos ante error de red
 RETRY_BACKOFF    = 5             # Segundos de espera base para retry
-BATCH_SIZE            = 10            # Registros por upsert a Supabase
+FLUSH_SIZE        = 50   # Cada cuántos registros hacer flush a Supabase (batch externo)
+CHUNK_MAIN        = 20   # Registros por llamada upsert en tablas con raw_data (licitaciones, ordenes_compra)
+CHUNK_ITEMS       = 200  # Registros por llamada upsert en tablas de items y lookup
 SESSION_LIMIT_SECONDS = 5 * 3600 + 30 * 60  # 5h 30m — margen antes del límite de GitHub Actions (6h)
 
 # Mapas de estado
@@ -227,6 +229,14 @@ def get_detalle(tipo: str, codigo: str, limiter: RateLimiter) -> Optional[dict]:
 # ─────────────────────────────────────────────
 # Parsers de datos
 # ─────────────────────────────────────────────
+def _trunc(val, n: int = 1000) -> Optional[str]:
+    """Trunca strings largos para no superar límites de columnas VARCHAR en Supabase."""
+    if val is None:
+        return None
+    s = str(val)
+    return s[:n] if len(s) > n else s
+
+
 def _safe_float(val) -> Optional[float]:
     try:
         return float(str(val).replace(".", "").replace(",", ".")) if val is not None else None
@@ -297,13 +307,13 @@ def parse_licitacion(raw: dict) -> tuple[dict, list[dict]]:
         items.append({
             "licitacion_codigo":           licitacion["codigo_externo"],
             "numero_linea":                _safe_int(it.get("Correlativo")),
-            "nombre_producto":             it.get("NombreProducto") or it.get("Producto"),
-            "descripcion":                 it.get("Descripcion"),
+            "nombre_producto":             _trunc(it.get("NombreProducto") or it.get("Producto")),
+            "descripcion":                 _trunc(it.get("Descripcion")),
             "cantidad":                    _safe_float(it.get("Cantidad")),
-            "unidad_medida":               it.get("UnidadMedida"),
+            "unidad_medida":               _trunc(it.get("UnidadMedida"), 100),
             "precio_neto_unitario":        _safe_float(it.get("PrecioNeto")),
             "rut_proveedor_adjudicado":    adj.get("RutProveedor"),
-            "nombre_proveedor_adjudicado": adj.get("NombreProveedor"),
+            "nombre_proveedor_adjudicado": _trunc(adj.get("NombreProveedor"), 500),
             "monto_unitario_adjudicado":   _safe_float(adj.get("MontoUnitario")),
             "cantidad_adjudicada":         _safe_float(adj.get("CantidadAdjudicada")),
         })
@@ -350,14 +360,11 @@ def parse_orden_compra(raw: dict) -> tuple[dict, list[dict], Optional[dict], Opt
         items.append({
             "orden_codigo":          oc["codigo"],
             "numero_linea":          _safe_int(it.get("Correlativo")),
-            # OC items usan "Producto", licitaciones usan "NombreProducto"
-            "nombre_producto":       it.get("NombreProducto") or it.get("Producto"),
-            "descripcion":           it.get("Descripcion") or it.get("EspecificacionComprador"),
-            # Preferir texto de categoría sobre el código numérico
-            "categoria":             it.get("Categoria") or it.get("CodigoCategoria"),
+            "nombre_producto":       _trunc(it.get("NombreProducto") or it.get("Producto")),
+            "descripcion":           _trunc(it.get("Descripcion") or it.get("EspecificacionComprador")),
+            "categoria":             _trunc(it.get("Categoria") or it.get("CodigoCategoria"), 500),
             "cantidad":              _safe_float(it.get("Cantidad")),
-            # OC items usan "Unidad", licitaciones usan "UnidadMedida"
-            "unidad_medida":         it.get("UnidadMedida") or it.get("Unidad"),
+            "unidad_medida":         _trunc(it.get("UnidadMedida") or it.get("Unidad"), 100),
             "precio_neto_unitario":  _safe_float(it.get("PrecioNeto")),
             "precio_total":          _safe_float(it.get("Total")),
         })
@@ -389,13 +396,14 @@ def parse_orden_compra(raw: dict) -> tuple[dict, list[dict], Optional[dict], Opt
 # ─────────────────────────────────────────────
 # Supabase helpers
 # ─────────────────────────────────────────────
-def upsert_batch(sb: Client, tabla: str, registros: list[dict], conflict_col: str) -> int:
-    """Upsert en lotes de BATCH_SIZE. Retorna el total de registros enviados."""
+def upsert_batch(sb: Client, tabla: str, registros: list[dict], conflict_col: str,
+                  chunk: int = CHUNK_MAIN) -> int:
+    """Upsert en lotes de `chunk` registros. Retorna el total enviado."""
     if not registros:
         return 0
     total = 0
-    for i in range(0, len(registros), BATCH_SIZE):
-        lote = registros[i : i + BATCH_SIZE]
+    for i in range(0, len(registros), chunk):
+        lote = registros[i : i + chunk]
         try:
             sb.table(tabla).upsert(lote, on_conflict=conflict_col).execute()
             total += len(lote)
@@ -566,8 +574,8 @@ def procesar_dia_licitaciones(sb: Client, fecha: date, limiter: RateLimiter,
     total_a_proc = len(codigos_a_procesar)
 
     def _flush_parcial(motivo: str):
-        upsert_batch(sb, "licitaciones",    licitaciones_batch, "codigo_externo")
-        upsert_batch(sb, "items_licitacion", items_batch, "licitacion_codigo,numero_linea")
+        upsert_batch(sb, "licitaciones",     licitaciones_batch, "codigo_externo",           chunk=CHUNK_MAIN)
+        upsert_batch(sb, "items_licitacion", items_batch,        "licitacion_codigo,numero_linea", chunk=CHUNK_ITEMS)
         req_usados = limiter.total_used() - req_inicio
         log_fin(sb, fecha, "licitacion", "parcial", len(codigos), procesados, req_usados)
         log.warning(
@@ -593,9 +601,9 @@ def procesar_dia_licitaciones(sb: Client, fecha: date, limiter: RateLimiter,
             items_batch.extend(items)
             procesados += 1
 
-        if len(licitaciones_batch) >= BATCH_SIZE:
-            upsert_batch(sb, "licitaciones",    licitaciones_batch, "codigo_externo")
-            upsert_batch(sb, "items_licitacion", items_batch, "licitacion_codigo,numero_linea")
+        if len(licitaciones_batch) >= FLUSH_SIZE:
+            upsert_batch(sb, "licitaciones",     licitaciones_batch, "codigo_externo",           chunk=CHUNK_MAIN)
+            upsert_batch(sb, "items_licitacion", items_batch,        "licitacion_codigo,numero_linea", chunk=CHUNK_ITEMS)
             licitaciones_batch.clear()
             items_batch.clear()
 
@@ -611,8 +619,8 @@ def procesar_dia_licitaciones(sb: Client, fecha: date, limiter: RateLimiter,
                 f" | ETA día:{eta:>8} | sesión:{t_ses}"
             )
 
-    upsert_batch(sb, "licitaciones",    licitaciones_batch, "codigo_externo")
-    upsert_batch(sb, "items_licitacion", items_batch, "licitacion_codigo,numero_linea")
+    upsert_batch(sb, "licitaciones",     licitaciones_batch, "codigo_externo",           chunk=CHUNK_MAIN)
+    upsert_batch(sb, "items_licitacion", items_batch,        "licitacion_codigo,numero_linea", chunk=CHUNK_ITEMS)
 
     elapsed  = (datetime.utcnow() - t0).total_seconds()
     req_dia  = limiter.total_used() - req_inicio
@@ -663,10 +671,10 @@ def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter,
     compradores_vistos, proveedores_vistos = set(), set()
 
     def _flush_parcial(motivo: str):
-        upsert_batch(sb, "compradores",        compradores_batch, "rut_unidad")
-        upsert_batch(sb, "proveedores",        proveedores_batch, "rut_sucursal")
-        upsert_batch(sb, "ordenes_compra",     oc_batch,          "codigo")
-        upsert_batch(sb, "items_orden_compra", items_batch,       "orden_codigo,numero_linea")
+        upsert_batch(sb, "compradores",        compradores_batch, "rut_unidad",                  chunk=CHUNK_ITEMS)
+        upsert_batch(sb, "proveedores",        proveedores_batch, "rut_sucursal",                chunk=CHUNK_ITEMS)
+        upsert_batch(sb, "ordenes_compra",     oc_batch,          "codigo",                      chunk=CHUNK_MAIN)
+        upsert_batch(sb, "items_orden_compra", items_batch,       "orden_codigo,numero_linea",   chunk=CHUNK_ITEMS)
         req_usados = limiter.total_used() - req_inicio
         log_fin(sb, fecha, "orden_compra", "parcial", len(codigos), procesados, req_usados)
         log.warning(
@@ -699,11 +707,11 @@ def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter,
             proveedores_batch.append(proveedor)
             proveedores_vistos.add(proveedor["rut_sucursal"])
 
-        if len(oc_batch) >= BATCH_SIZE:
-            upsert_batch(sb, "compradores",        compradores_batch, "rut_unidad")
-            upsert_batch(sb, "proveedores",        proveedores_batch, "rut_sucursal")
-            upsert_batch(sb, "ordenes_compra",     oc_batch,          "codigo")
-            upsert_batch(sb, "items_orden_compra", items_batch,       "orden_codigo,numero_linea")
+        if len(oc_batch) >= FLUSH_SIZE:
+            upsert_batch(sb, "compradores",        compradores_batch, "rut_unidad",                  chunk=CHUNK_ITEMS)
+            upsert_batch(sb, "proveedores",        proveedores_batch, "rut_sucursal",                chunk=CHUNK_ITEMS)
+            upsert_batch(sb, "ordenes_compra",     oc_batch,          "codigo",                      chunk=CHUNK_MAIN)
+            upsert_batch(sb, "items_orden_compra", items_batch,       "orden_codigo,numero_linea",   chunk=CHUNK_ITEMS)
             oc_batch.clear(); items_batch.clear()
             compradores_batch.clear(); proveedores_batch.clear()
 
@@ -719,10 +727,10 @@ def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter,
                 f" | ETA día:{eta:>8} | sesión:{t_ses}"
             )
 
-    upsert_batch(sb, "compradores",        compradores_batch, "rut_unidad")
-    upsert_batch(sb, "proveedores",        proveedores_batch, "rut_sucursal")
-    upsert_batch(sb, "ordenes_compra",     oc_batch,          "codigo")
-    upsert_batch(sb, "items_orden_compra", items_batch,       "orden_codigo,numero_linea")
+    upsert_batch(sb, "compradores",        compradores_batch, "rut_unidad",                  chunk=CHUNK_ITEMS)
+    upsert_batch(sb, "proveedores",        proveedores_batch, "rut_sucursal",                chunk=CHUNK_ITEMS)
+    upsert_batch(sb, "ordenes_compra",     oc_batch,          "codigo",                      chunk=CHUNK_MAIN)
+    upsert_batch(sb, "items_orden_compra", items_batch,       "orden_codigo,numero_linea",   chunk=CHUNK_ITEMS)
 
     elapsed  = (datetime.utcnow() - t0).total_seconds()
     req_dia  = limiter.total_used() - req_inicio
