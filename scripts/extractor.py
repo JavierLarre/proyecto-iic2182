@@ -201,12 +201,17 @@ def _get(url: str, params: dict, limiter: RateLimiter) -> Optional[dict]:
     return None
 
 
-def get_codigos_por_fecha(tipo: str, fecha_str: str, limiter: RateLimiter) -> list[str]:
-    """Obtiene lista de códigos para una fecha (formato ddmmaaaa)."""
+def get_codigos_por_fecha(tipo: str, fecha_str: str, limiter: RateLimiter) -> Optional[list[str]]:
+    """Obtiene lista de códigos para una fecha (formato ddmmaaaa).
+    Retorna None si la API falló (error HTTP / timeout / tickets agotados).
+    Retorna [] si la API respondió OK pero no hay registros para esa fecha.
+    """
     url = BASE_URL_LIC if tipo == "licitacion" else BASE_URL_OC
     data = _get(url, {"fecha": fecha_str}, limiter)
-    if not data:
-        return []
+    if data is None:
+        # _get devuelve None solo cuando todos los reintentos fallaron —
+        # no sabemos si la fecha tiene datos; NO marcar como completado.
+        return None
     listado = data.get("Listado", []) or []
     if tipo == "licitacion":
         return [item.get("CodigoExterno") for item in listado if item.get("CodigoExterno")]
@@ -499,6 +504,7 @@ def generar_cola_auto(
     res = sb.table("extraccion_log").select("fecha,tipo,estado").execute()
     completados: set[tuple[str, str]] = set()
     for row in (res.data or []):
+        # Solo "completado" se saltea; "error", "parcial" y "pendiente" se reintenta
         if row["estado"] == "completado":
             completados.add((row["fecha"], row["tipo"]))
 
@@ -547,6 +553,12 @@ def procesar_dia_licitaciones(sb: Client, fecha: date, limiter: RateLimiter,
     req_inicio = limiter.total_used()
 
     codigos = get_codigos_por_fecha("licitacion", fecha_str, limiter)
+    if codigos is None:
+        # La API falló tras todos los reintentos — no sabemos si hay datos.
+        # Se deja como "error" para que la próxima sesión lo reintente.
+        log_fin(sb, fecha, "licitacion", "error", 0, 0, limiter.total_used() - req_inicio)
+        log.warning("    API no respondió para esta fecha — se reintentará en la próxima sesión")
+        return 0
     if not codigos:
         estado_final = "parcial" if fecha == date.today() else "completado"
         log_fin(sb, fecha, "licitacion", estado_final, 0, 0, limiter.total_used() - req_inicio)
@@ -643,6 +655,10 @@ def procesar_dia_ordenes(sb: Client, fecha: date, limiter: RateLimiter,
     req_inicio = limiter.total_used()
 
     codigos = get_codigos_por_fecha("orden_compra", fecha_str, limiter)
+    if codigos is None:
+        log_fin(sb, fecha, "orden_compra", "error", 0, 0, limiter.total_used() - req_inicio)
+        log.warning("    API no respondió para esta fecha — se reintentará en la próxima sesión")
+        return 0
     if not codigos:
         estado_final = "parcial" if fecha == date.today() else "completado"
         log_fin(sb, fecha, "orden_compra", estado_final, 0, 0, limiter.total_used() - req_inicio)
