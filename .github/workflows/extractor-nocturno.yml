@@ -94,6 +94,7 @@ jobs:
 
       - name: Resumen de resultados
         if: always()
+        continue-on-error: true   # nunca falla el job — es solo informativo
         run: |
           python3 -c "
           import os
@@ -101,13 +102,21 @@ jobs:
 
           sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_ROLE_KEY'])
 
-          lic = sb.table('licitaciones').select('count', count='exact').execute().count
-          oc  = sb.table('ordenes_compra').select('count', count='exact').execute().count
-          log = sb.table('extraccion_log').select('estado').eq('estado','completado').execute()
+          # Usar extraccion_log (tabla pequeña, siempre rápida) en vez de
+          # COUNT(*) sobre licitaciones/ordenes_compra que puede hacer timeout
+          # en el free tier de Supabase tras horas de escrituras masivas.
+          logs = sb.table('extraccion_log').select('estado,tipo').execute().data or []
+
+          completados = [r for r in logs if r['estado'] == 'completado']
+          errores     = [r for r in logs if r['estado'] == 'error']
+          parciales   = [r for r in logs if r['estado'] == 'parcial']
+          pendientes  = [r for r in logs if r['estado'] == 'pendiente']
 
           print('─' * 40)
-          print(f'Licitaciones en BD:   {lic:,}')
-          print(f'Órdenes de compra:    {oc:,}')
-          print(f'Fechas completadas:   {len(log.data):,}')
+          print(f'Fechas completadas:   {len(completados):,}')
+          print(f'Fechas con error:     {len(errores):,}')
+          print(f'Fechas parciales:     {len(parciales):,}')
+          print(f'Fechas pendientes:    {len(pendientes):,}')
+          print(f'Total en log:         {len(logs):,}')
           print('─' * 40)
           "
