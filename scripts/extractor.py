@@ -83,8 +83,10 @@ ESTADO_OC  = {4: "Enviada a Proveedor", 5: "En proceso", 6: "Aceptada", 9: "Canc
 
 # Estados que indican que el registro no cambiará más → se salta con seguridad sin re-fetchear
 # Los registros con estado no-final se re-descargan para capturar cambios (ej: adjudicación)
-ESTADOS_FINALES_LIC = {7, 8, 18, 19}   # Desierta, Adjudicada, Revocada, Suspendida
-ESTADOS_FINALES_OC  = {9, 12}           # Cancelada, Recepción Conforme
+# Nota: la API usa múltiples códigos para algunos estados finales (ej: Revocada = 15 y 18,
+# Suspendida = 16 y 19). Se incluyen todos los observados en datos reales.
+ESTADOS_FINALES_LIC = {7, 8, 15, 16, 18, 19}  # Desierta, Adjudicada, Revocada(15/18), Suspendida(16/19)
+ESTADOS_FINALES_OC  = {9, 11, 12}              # Cancelada, No aceptada, Recepción Conforme
 
 # ─────────────────────────────────────────────
 # Logging

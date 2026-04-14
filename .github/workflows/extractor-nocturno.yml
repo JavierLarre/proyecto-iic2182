@@ -102,21 +102,33 @@ jobs:
 
           sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_SERVICE_ROLE_KEY'])
 
-          # Usar extraccion_log (tabla pequeña, siempre rápida) en vez de
-          # COUNT(*) sobre licitaciones/ordenes_compra que puede hacer timeout
-          # en el free tier de Supabase tras horas de escrituras masivas.
-          logs = sb.table('extraccion_log').select('estado,tipo').execute().data or []
-
+          # extraccion_log: tabla pequeña, siempre rápida
+          logs = sb.table('extraccion_log').select('estado,tipo,total_detalle').execute().data or []
           completados = [r for r in logs if r['estado'] == 'completado']
           errores     = [r for r in logs if r['estado'] == 'error']
           parciales   = [r for r in logs if r['estado'] == 'parcial']
-          pendientes  = [r for r in logs if r['estado'] == 'pendiente']
+
+          # Conteos de BD: intentar exacto; si Supabase hace timeout tras horas de escritura
+          # se cae al fallback de sumar total_detalle del log (aproximación sin dedup).
+          try:
+              lic = sb.table('licitaciones').select('count', count='exact').execute().count
+              lic_str = f'{lic:,}'
+          except Exception:
+              lic_approx = sum(r.get('total_detalle') or 0 for r in completados if r['tipo'] == 'licitacion')
+              lic_str = f'~{lic_approx:,} (aprox)'
+
+          try:
+              oc = sb.table('ordenes_compra').select('count', count='exact').execute().count
+              oc_str = f'{oc:,}'
+          except Exception:
+              oc_approx = sum(r.get('total_detalle') or 0 for r in completados if r['tipo'] == 'orden_compra')
+              oc_str = f'~{oc_approx:,} (aprox)'
 
           print('─' * 40)
+          print(f'Licitaciones en BD:   {lic_str}')
+          print(f'Ordenes de compra:    {oc_str}')
           print(f'Fechas completadas:   {len(completados):,}')
           print(f'Fechas con error:     {len(errores):,}')
           print(f'Fechas parciales:     {len(parciales):,}')
-          print(f'Fechas pendientes:    {len(pendientes):,}')
-          print(f'Total en log:         {len(logs):,}')
           print('─' * 40)
           "
