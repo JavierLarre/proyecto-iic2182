@@ -1,21 +1,22 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Noto_Sans, DM_Sans } from "next/font/google";
 import "./globals.css";
-import { Navbar } from "@/components/Navbar";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const notoSans = Noto_Sans({
+  variable: "--font-noto-sans",
   subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const dmSans = DM_Sans({
+  variable: "--font-dm-sans",
   subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
 });
 
 export const metadata: Metadata = {
-  title: "Plataforma Mercado Público",
-  description: "Plataforma de análisis territorial de Mercado Público",
+  title: "Licitapp",
+  description: "Inteligencia territorial para el mercado público chileno",
 };
 
 export default function RootLayout({
@@ -26,13 +27,10 @@ export default function RootLayout({
   return (
     <html
       lang="es"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${notoSans.variable} ${dmSans.variable} h-full antialiased`}
     >
-      <body className="h-full flex flex-col">
-        <Navbar />
-        <main className="flex-1 overflow-hidden">
-          {children}
-        </main>
+      <body className="h-full">
+        {children}
       </body>
     </html>
   );
