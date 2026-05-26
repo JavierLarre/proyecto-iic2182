@@ -17,8 +17,9 @@ export async function getComunaChoropleth(): Promise<Record<number, ComunaMetric
     supabase.from('mv_oc_comuna').select('*'),
     supabase.from('mv_lic_comuna').select('*'),
   ]);
-  if (oc.error) throw new Error(oc.error.message);
-  if (lic.error) throw new Error(lic.error.message);
+  // Si Supabase no está configurado (build sin env vars) devolvemos vacío en
+  // lugar de lanzar, para que el build de Vercel no falle.
+  if (oc.error || lic.error) return {};
 
   const map: Record<number, ComunaMetricas> = {};
   for (const r of oc.data ?? []) {
