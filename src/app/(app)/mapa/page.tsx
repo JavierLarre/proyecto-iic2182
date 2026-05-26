@@ -1,23 +1,9 @@
-'use client';
+import { getComunaChoropleth } from '@/lib/data/mapa';
+import { ComunaMapLoader } from '@/components/map/ComunaMapLoader';
 
-import dynamic from 'next/dynamic';
+export const revalidate = 1800;
 
-const ProveedorMapView = dynamic(
-  () => import('@/components/map/ProveedorMapView').then(m => ({ default: m.ProveedorMapView })),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="h-full w-full flex items-center justify-center bg-gray-50">
-        <p className="text-gray-500 text-sm">Cargando mapa...</p>
-      </div>
-    ),
-  }
-);
-
-export default function MapaPage() {
-  return (
-    <div className="h-full w-full">
-      <ProveedorMapView />
-    </div>
-  );
+export default async function MapaPage() {
+  const choropleth = await getComunaChoropleth();
+  return <ComunaMapLoader choropleth={choropleth} />;
 }
