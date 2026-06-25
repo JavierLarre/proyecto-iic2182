@@ -1,3 +1,4 @@
+import { Toaster } from "sonner";
 import { Navbar } from "@/components/Navbar";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
@@ -7,6 +8,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       <main className="flex-1 overflow-hidden">
         {children}
       </main>
+      <Toaster richColors position="top-right" toastOptions={{ duration: 2500 }} />
     </div>
   );
 }

@@ -1,8 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
   reactCompiler: true,
+  serverExternalPackages: ['maplibre-gl', 'react-map-gl', '@deck.gl/core', '@deck.gl/layers', '@deck.gl/mapbox'],
 };
 
 export default nextConfig;

@@ -2,17 +2,14 @@
 
 import dynamic from 'next/dynamic';
 import type { ComunaMetricas } from '@/lib/data/mapa';
+import { MapSkeleton } from './MapSkeleton';
 
 // maplibre-gl necesita `window`, así que el mapa se carga solo en el cliente.
 const Mapa = dynamic(
   () => import('./ComunaChoroplethMap').then((m) => m.ComunaChoroplethMap),
   {
     ssr: false,
-    loading: () => (
-      <div className="h-full w-full flex items-center justify-center bg-background text-app-text/50 text-sm">
-        Cargando mapa...
-      </div>
-    ),
+    loading: () => <MapSkeleton />,
   },
 );
 

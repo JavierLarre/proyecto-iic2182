@@ -5,7 +5,8 @@ import {
   PieChart, Pie, Cell, ResponsiveContainer, Tooltip as ChartTooltip, Legend,
   LineChart, Line, XAxis, YAxis, CartesianGrid,
 } from 'recharts';
-import { X, MapPin, Loader2, Receipt, TrendingUp, Users, Building2, FileText, Award } from 'lucide-react';
+import Link from 'next/link';
+import { X, MapPin, Loader2, Receipt, TrendingUp, Users, Building2, FileText, Award, FileSearch, ArrowRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { fmtCLP, fmtCLPFull, fmtInt, fmtMesCorto, fmtFecha } from '@/lib/format';
 import {
@@ -73,6 +74,21 @@ export function ComunaPanel({
             <X className="h-5 w-5" />
           </button>
         </div>
+
+        {/* Acciones cruzadas: saltar a las otras vistas pre-filtradas por la comuna */}
+        {!sinDatos && (
+          <div className="bg-surface border-b border-borders px-6 py-2.5 flex flex-wrap items-center gap-2 flex-shrink-0">
+            <span className="text-label text-app-text/40 mr-1">Profundizar:</span>
+            <Link href={`/dashboard?region=${encodeURIComponent(regionNombre)}&comunaCod=${cod}`}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-app-text/70 hover:text-primary border border-borders hover:border-primary/40 rounded-full px-3 py-1 transition-colors">
+              <Receipt className="h-3.5 w-3.5" strokeWidth={1.5} /> Órdenes en {nombre} <ArrowRight className="h-3 w-3" />
+            </Link>
+            <Link href={`/licitaciones?region=${encodeURIComponent(regionNombre)}&comunaCod=${cod}`}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-app-text/70 hover:text-primary border border-borders hover:border-primary/40 rounded-full px-3 py-1 transition-colors">
+              <FileSearch className="h-3.5 w-3.5" strokeWidth={1.5} /> Licitaciones en {nombre} <ArrowRight className="h-3 w-3" />
+            </Link>
+          </div>
+        )}
 
         <div className="flex-1 overflow-y-auto p-6 space-y-5">
           {error && (
