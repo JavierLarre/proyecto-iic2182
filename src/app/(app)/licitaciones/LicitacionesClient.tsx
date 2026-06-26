@@ -10,16 +10,19 @@ import {
 } from 'recharts';
 import {
   Search, TrendingUp, Copy, ExternalLink, Building2, Calendar, Tag, MapPin,
-  AlertTriangle, RotateCw, Radar, ChevronRight, ChevronLeft, Megaphone, Award, XCircle, Clock, Loader2,
+  AlertTriangle, RotateCw, Radar, ChevronRight, Megaphone, Award, XCircle, Clock, Loader2,
+  Target, Swords, Trophy, X,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { Card, CardHeader, CardBody, CardFooter, Skeleton, DetailDrawer } from '@/components/ui';
+import { Card, CardHeader, CardBody, Skeleton, DetailDrawer, Pager } from '@/components/ui';
 import { fmtCLP, fmtCLPFull, fmtInt, fmtMesCorto, fmtFecha } from '@/lib/format';
 import {
   type LicitacionesData, type Licitacion,
   fetchLicLista, fetchLicResumen, type LicListaResult, type LicResumen,
+  fetchLicEvaluacion, type LicEvaluacion,
 } from '@/lib/data/licitaciones';
 import { fetchComunasRef, type ComunaRef } from '@/lib/data/comunas';
+import { OrganismoDrawer } from '@/components/OrganismoDrawer';
 
 const ESTADO_COLOR: Record<string, string> = {
   'Adjudicada': '#6DCFB0', 'Publicada': '#49C5EF', 'Cerrada': '#5B8FE8',
@@ -54,22 +57,26 @@ const ABIERTA = 'Publicada';
 const PAGE = 12;
 
 export function LicitacionesClient({
-  data, error, initialRegion, initialBusqueda, initialCod,
-}: { data: LicitacionesData; error?: string; initialRegion?: string; initialBusqueda?: string; initialCod?: number }) {
+  data, error, initialRegion, initialBusqueda, initialCod, initialCompradorRut, initialCompradorNombre,
+}: { data: LicitacionesData; error?: string; initialRegion?: string; initialBusqueda?: string; initialCod?: number; initialCompradorRut?: string; initialCompradorNombre?: string }) {
   const [region, setRegion] = useState<string>(initialRegion ?? TODAS);
   const [cod, setCod] = useState<number | null>(initialCod ?? null);
   const [busqueda, setBusqueda] = useState(initialBusqueda ?? '');
   const [filtroTipo, setFiltroTipo] = useState('');
-  const [soloAbiertas, setSoloAbiertas] = useState(true);
+  const [soloAbiertas, setSoloAbiertas] = useState(initialCompradorRut ? false : true);
   const [orden, setOrden] = useState<Orden>('recientes');
   const [metrica, setMetrica] = useState<Metric>('cantidad');
   const [page, setPage] = useState(0);
+  const [filtroComprador, setFiltroComprador] = useState<{ rut: string; nombre: string | null } | null>(
+    initialCompradorRut ? { rut: initialCompradorRut, nombre: initialCompradorNombre ?? null } : null,
+  );
 
   const [comunas, setComunas] = useState<ComunaRef[]>([]);
   const [lista, setLista] = useState<LicListaResult | null>(null);
   const [loadingLista, setLoadingLista] = useState(true);
   const [resumen, setResumen] = useState<LicResumen | null>(null);
   const [selected, setSelected] = useState<Licitacion | null>(null);
+  const [orgRut, setOrgRut] = useState<{ rut: string; nombre: string | null } | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const headerVisible = useAutoHideHeader(scrollRef, 'scroll');
@@ -86,16 +93,16 @@ export function LicitacionesClient({
   // Debounce búsqueda + reset página
   const [qDebounced, setQDebounced] = useState(busqueda);
   useEffect(() => { const t = setTimeout(() => setQDebounced(busqueda), 350); return () => clearTimeout(t); }, [busqueda]);
-  useEffect(() => { setPage(0); }, [qDebounced, region, cod, filtroTipo, soloAbiertas, orden]);
+  useEffect(() => { setPage(0); }, [qDebounced, region, cod, filtroTipo, soloAbiertas, orden, filtroComprador]);
 
   // Fetch lista (real, paginada)
   useEffect(() => {
     let alive = true; setLoadingLista(true);
-    fetchLicLista({ region: regionParam, cod, estado: soloAbiertas ? ABIERTA : null, tipo: filtroTipo || null, q: qDebounced || null, sort: orden, limit: PAGE, offset: page * PAGE })
+    fetchLicLista({ region: regionParam, cod, estado: soloAbiertas ? ABIERTA : null, tipo: filtroTipo || null, q: qDebounced || null, sort: orden, limit: PAGE, offset: page * PAGE, compradorRut: filtroComprador?.rut ?? null })
       .then((r) => { if (alive) { setLista(r); setLoadingLista(false); } })
-      .catch(() => { if (alive) { setLista({ rows: [], has_more: false }); setLoadingLista(false); } });
+      .catch(() => { if (alive) { setLista({ rows: [], has_more: false, total: 0, capped: false }); setLoadingLista(false); } });
     return () => { alive = false; };
-  }, [regionParam, cod, soloAbiertas, filtroTipo, qDebounced, orden, page]);
+  }, [regionParam, cod, soloAbiertas, filtroTipo, qDebounced, orden, page, filtroComprador]);
 
   // Fetch KPIs scoped
   useEffect(() => {
@@ -168,7 +175,7 @@ export function LicitacionesClient({
               <AlertTriangle className="h-5 w-5 text-error flex-shrink-0 mt-0.5" strokeWidth={1.5} />
               <div className="flex-1">
                 <p className="text-sm font-medium text-app-text">{error}</p>
-                <button onClick={() => window.location.reload()} className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:underline"><RotateCw className="h-3.5 w-3.5" /> Reintentar</button>
+                <button onClick={() => window.location.reload()} className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:text-primary-hover"><RotateCw className="h-3.5 w-3.5" /> Reintentar</button>
               </div>
             </div>
           )}
@@ -209,10 +216,18 @@ export function LicitacionesClient({
 
           {/* Lista de oportunidades */}
           <Card>
+            {filtroComprador && (
+              <div className="px-4 pt-3">
+                <button onClick={() => setFiltroComprador(null)}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium bg-primary/10 text-primary rounded-full pl-2.5 pr-2 py-1 hover:bg-primary/20 transition-colors">
+                  <Building2 className="h-3.5 w-3.5" /> Organismo: {filtroComprador.nombre ?? filtroComprador.rut} <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
             <CardHeader className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <Radar className="h-4 w-4 text-primary" strokeWidth={1.5} />
-                <span className="text-sm font-medium text-app-text capitalize">Oportunidades · {scopeLabel}</span>
+                <span className="text-sm font-medium text-app-text capitalize">Oportunidades · {filtroComprador ? (filtroComprador.nombre ?? 'organismo') : scopeLabel}</span>
                 {loadingLista && <Loader2 className="h-3.5 w-3.5 animate-spin text-app-text/40" />}
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -236,19 +251,19 @@ export function LicitacionesClient({
               </div>
             </CardHeader>
             <CardBody>
-              {loadingLista ? (
-                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
-                  {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-36 rounded-[10px]" />)}
+              {!lista ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 max-h-[560px] overflow-hidden pr-1">
+                  {Array.from({ length: 9 }).map((_, i) => <Skeleton key={i} className="h-36 rounded-[10px]" />)}
                 </div>
-              ) : (lista?.rows.length ?? 0) === 0 ? (
+              ) : lista.rows.length === 0 ? (
                 <div className="text-center py-12 text-sm text-app-text/40">No hay oportunidades para este filtro. Prueba otro rubro o desactiva “Abiertas”.</div>
               ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 max-h-[560px] overflow-y-auto pr-1">
-                  {lista!.rows.map((l) => (<OportunidadCard key={l.codigo_externo} lic={l} onClick={() => setSelected(l)} />))}
+                <div className={cn('grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 max-h-[560px] overflow-y-auto pr-1 transition-opacity', loadingLista && 'opacity-40')}>
+                  {lista.rows.map((l) => (<OportunidadCard key={l.codigo_externo} lic={l} onClick={() => setSelected(l)} />))}
                 </div>
               )}
             </CardBody>
-            <Pager page={page} hasMore={lista?.has_more ?? false} onPage={setPage} loading={loadingLista} />
+            <Pager page={page} pageCount={Math.ceil((lista?.total ?? 0) / PAGE)} total={lista?.total ?? 0} capped={lista?.capped ?? false} noun="oportunidades" onPage={setPage} loading={loadingLista} />
           </Card>
 
           {/* Dónde hay más oportunidades */}
@@ -334,24 +349,21 @@ export function LicitacionesClient({
 
       <DetailDrawer open={selected !== null} onClose={() => setSelected(null)}
         title={selected?.nombre ?? selected?.codigo_externo ?? 'Licitación'} subtitle={selected?.codigo_externo}>
-        {selected && <LicitacionDetalle lic={selected} onBuscarOrganismo={(nombre) => { setBusqueda(nombre); setSelected(null); toast.success('Filtrando por organismo'); }} />}
+        {selected && <LicitacionDetalle lic={selected}
+          onBuscarOrganismo={(nombre) => { setBusqueda(nombre); setSelected(null); toast.success('Filtrando por organismo'); }}
+          onVerOrganismo={(rut, nombre) => { setSelected(null); setOrgRut({ rut, nombre }); }} />}
       </DetailDrawer>
+
+      {/* Drawer perfil de organismo (desde "ver perfil" en la evaluación) */}
+      <OrganismoDrawer
+        rut={orgRut?.rut ?? null}
+        nombreInicial={orgRut?.nombre}
+        onClose={() => setOrgRut(null)}
+      />
     </div>
   );
 }
 
-/* ── Paginación (por has_more) ──────────────────────────────────────────── */
-function Pager({ page, hasMore, onPage, loading }: { page: number; hasMore: boolean; onPage: (p: number) => void; loading: boolean }) {
-  return (
-    <CardFooter className="flex items-center justify-end gap-2 text-xs text-app-text/50">
-      <button onClick={() => onPage(Math.max(0, page - 1))} disabled={page <= 0 || loading}
-        className="inline-flex items-center gap-1 px-2 py-1 rounded-[6px] border border-borders hover:bg-background disabled:opacity-40 disabled:cursor-not-allowed transition-colors"><ChevronLeft className="h-3.5 w-3.5" /> Anterior</button>
-      <span className="tabular-nums" aria-live="polite">Página {page + 1}</span>
-      <button onClick={() => onPage(page + 1)} disabled={!hasMore || loading}
-        className="inline-flex items-center gap-1 px-2 py-1 rounded-[6px] border border-borders hover:bg-background disabled:opacity-40 disabled:cursor-not-allowed transition-colors">Siguiente <ChevronRight className="h-3.5 w-3.5" /></button>
-    </CardFooter>
-  );
-}
 
 /* ── Tarjeta de oportunidad ─────────────────────────────────────────────── */
 function OportunidadCard({ lic, onClick }: { lic: Licitacion; onClick: () => void }) {
@@ -371,7 +383,7 @@ function OportunidadCard({ lic, onClick }: { lic: Licitacion; onClick: () => voi
       </div>
       <div className="flex items-center justify-between gap-2 pt-1 mt-auto border-t border-borders/60">
         <span className="inline-flex items-center gap-1.5 text-xs text-app-text/50"><Clock className="h-3.5 w-3.5" strokeWidth={1.5} /> Cierra: {fmtFecha(lic.fecha_cierre)}</span>
-        <span className="inline-flex items-center gap-1 text-xs font-medium text-primary group-hover:underline">Evaluar <ChevronRight className="h-3.5 w-3.5" /></span>
+        <span className="inline-flex items-center gap-1 text-xs font-medium text-primary group-hover:text-primary-hover">Evaluar <ChevronRight className="h-3.5 w-3.5" /></span>
       </div>
     </div>
   );
@@ -396,8 +408,21 @@ function EstadoBadge({ estado }: { estado: string | null }) {
   return <span className="inline-flex px-2.5 py-0.5 rounded-full text-xs font-medium whitespace-nowrap" style={{ background: `${color}26`, color }}>{e}</span>;
 }
 
-function LicitacionDetalle({ lic, onBuscarOrganismo }: { lic: Licitacion; onBuscarOrganismo: (nombre: string) => void }) {
+function LicitacionDetalle({ lic, onBuscarOrganismo, onVerOrganismo }: {
+  lic: Licitacion; onBuscarOrganismo: (nombre: string) => void; onVerOrganismo: (rut: string, nombre: string | null) => void;
+}) {
   const fichaUrl = `https://www.mercadopublico.cl/Procurement/Modules/RFB/DetailsAcquisition.aspx?idLicitacion=${encodeURIComponent(lic.codigo_externo)}`;
+  const [evalData, setEvalData] = useState<LicEvaluacion | null>(null);
+  const [loadingEval, setLoadingEval] = useState(true);
+
+  useEffect(() => {
+    let alive = true; setLoadingEval(true); setEvalData(null);
+    fetchLicEvaluacion(lic.codigo_externo)
+      .then((d) => { if (alive) { setEvalData(d); setLoadingEval(false); } })
+      .catch(() => { if (alive) setLoadingEval(false); });
+    return () => { alive = false; };
+  }, [lic.codigo_externo]);
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center gap-2">
@@ -408,6 +433,57 @@ function LicitacionDetalle({ lic, onBuscarOrganismo }: { lic: Licitacion; onBusc
         <p className="text-label text-app-text/40">Monto estimado</p>
         <p className="text-xl font-bold text-app-text mt-0.5">{lic.monto_estimado != null && lic.unidad_monetaria === 'CLP' ? fmtCLPFull(lic.monto_estimado) : '— sin monto publicado'}</p>
       </div>
+
+      {/* ── ¿Conviene ofertar? ─────────────────────────────────────────── */}
+      <div className="rounded-[8px] border border-primary/30 bg-primary/5 px-4 py-3">
+        <p className="text-sm font-semibold text-app-text flex items-center gap-1.5 mb-2">
+          <Target className="h-4 w-4 text-primary" strokeWidth={1.5} /> ¿Conviene ofertar?
+        </p>
+        {loadingEval ? (
+          <div className="space-y-2"><Skeleton className="h-5 w-full" /><Skeleton className="h-12 w-full" /></div>
+        ) : evalData ? (
+          <div className="space-y-3">
+            {evalData.organismo && (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-app-text/60">Este organismo adjudica</span>
+                <TasaBadge tasa={evalData.organismo.tasa_adjudicacion} n={evalData.organismo.n_total} />
+              </div>
+            )}
+            <div className="grid grid-cols-2 gap-2">
+              <div className="bg-surface rounded-[6px] px-2.5 py-1.5">
+                <p className="text-label text-app-text/40 flex items-center gap-1"><Swords className="h-3 w-3" /> Competencia</p>
+                <p className="text-sm font-bold text-app-text mt-0.5">{fmtInt(evalData.n_competidores)} <span className="text-xs font-normal text-app-text/50">proveedores ganan el rubro</span></p>
+              </div>
+              <div className="bg-surface rounded-[6px] px-2.5 py-1.5">
+                <p className="text-label text-app-text/40 flex items-center gap-1"><TrendingUp className="h-3 w-3" /> Monto típico</p>
+                <p className="text-sm font-bold text-app-text mt-0.5">{evalData.monto_tipico != null ? fmtCLP(evalData.monto_tipico) : '—'}</p>
+              </div>
+            </div>
+            {evalData.ganadores_rubro.length > 0 && (
+              <div>
+                <p className="text-label text-app-text/40 mb-1 flex items-center gap-1"><Trophy className="h-3 w-3" /> Quién suele ganar este rubro</p>
+                <div className="space-y-1">
+                  {evalData.ganadores_rubro.slice(0, 4).map((g, i) => (
+                    <div key={(g.nombre ?? '') + i} className="flex items-center justify-between gap-2 text-xs">
+                      <span className="text-app-text truncate">{g.nombre ?? '—'}</span>
+                      <span className="text-app-text/40 flex-shrink-0">{fmtInt(g.n)} adj.</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {evalData.organismo && (
+              <button onClick={() => onVerOrganismo(evalData.organismo!.rut, evalData.organismo!.nombre)}
+                className="w-full flex items-center justify-center gap-1.5 text-xs font-medium text-primary hover:text-primary-hover pt-1">
+                <Building2 className="h-3.5 w-3.5" /> Ver perfil completo del organismo
+              </button>
+            )}
+          </div>
+        ) : (
+          <p className="text-xs text-app-text/40">Sin datos de contexto para esta licitación.</p>
+        )}
+      </div>
+
       <dl className="space-y-3">
         <DetalleItem icon={<Building2 className="h-4 w-4" strokeWidth={1.5} />} label="Organismo comprador" value={lic.comprador_nombre} />
         <DetalleItem icon={<MapPin className="h-4 w-4" strokeWidth={1.5} />} label="Comuna" value={lic.comprador_comuna} />
@@ -423,6 +499,15 @@ function LicitacionDetalle({ lic, onBuscarOrganismo }: { lic: Licitacion; onBusc
         <a href={fichaUrl} target="_blank" rel="noopener noreferrer" className="flex items-center justify-center gap-2 rounded-[8px] bg-primary px-4 py-2 text-sm font-medium text-surface hover:bg-primary-hover transition-colors"><ExternalLink className="h-4 w-4" strokeWidth={1.5} /> Ver ficha en Mercado Público</a>
       </div>
     </div>
+  );
+}
+
+function TasaBadge({ tasa, n }: { tasa: number; n: number }) {
+  const color = tasa >= 60 ? 'bg-success/15 text-success' : tasa >= 35 ? 'bg-warning/15 text-warning' : 'bg-error/15 text-error';
+  return (
+    <span className={cn('inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full', color)}>
+      {tasa}% <span className="font-normal opacity-70">de {fmtInt(n)} licitaciones</span>
+    </span>
   );
 }
 

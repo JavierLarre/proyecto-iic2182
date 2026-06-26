@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useMemo, useEffect, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { useAutoHideHeader } from '@/lib/useAutoHideHeader';
 import {
@@ -11,16 +12,18 @@ import {
 import {
   Search, TrendingUp, Users, Building2, Receipt,
   Copy, Calendar, MapPin, FileText, AlertTriangle, RotateCw, Trophy, Crown, ChevronRight, Swords,
-  ChevronLeft, Loader2,
+  Loader2, X,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { Card, CardHeader, CardBody, CardFooter, Input, DetailDrawer, Skeleton } from '@/components/ui';
+import { Card, CardHeader, CardBody, Input, DetailDrawer, Skeleton, Pager } from '@/components/ui';
 import { fmtCLP, fmtCLPFull, fmtInt, fmtMesCorto, fmtFecha } from '@/lib/format';
 import {
   type DashboardData, type OCOrden,
   fetchOcLista, fetchOcConcentracion, type OcListaResult,
+  fetchOcTopCompradores, type OcTopCompradores,
 } from '@/lib/data/dashboard';
 import { fetchComunasRef, type ComunaRef } from '@/lib/data/comunas';
+import { OrganismoDrawer } from '@/components/OrganismoDrawer';
 
 const ESTADO_COLOR: Record<string, string> = {
   'Recepción Conforme': '#6DCFB0', 'Aceptada': '#5B8FE8', 'Enviada a Proveedor': '#7EC8E3',
@@ -55,9 +58,24 @@ export function DashboardClient({
 
   const [selected, setSelected] = useState<OCOrden | null>(null);
   const [selectedProv, setSelectedProv] = useState<LBItem | null>(null);
+  const [lbModo, setLbModo] = useState<'proveedores' | 'organismos'>('proveedores');
+  const [compradores, setCompradores] = useState<OcTopCompradores | null>(null);
+  const [orgRut, setOrgRut] = useState<{ rut: string; nombre: string | null } | null>(null);
+  // Filtro de evidencia por RUT exacto (comprador o proveedor)
+  const [filtroRut, setFiltroRut] = useState<{ tipo: 'comprador' | 'proveedor'; rut: string; nombre: string | null } | null>(null);
 
+  const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const evidenciaRef = useRef<HTMLDivElement>(null);
   const headerVisible = useAutoHideHeader(scrollRef, 'scroll');
+
+  // Filtra la evidencia por RUT exacto y desplaza a la sección de órdenes.
+  function filtrarPorRut(tipo: 'comprador' | 'proveedor', rut: string, nombre: string | null) {
+    setFiltroRut({ tipo, rut, nombre });
+    setBusqueda('');
+    setSelectedProv(null); setOrgRut(null); setSelected(null);
+    setTimeout(() => evidenciaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+  }
 
   const regionParam = region === TODAS ? null : region;
   const scoped = regionParam !== null || cod !== null;
@@ -74,16 +92,18 @@ export function DashboardClient({
   // ── Debounce búsqueda + reset de página al cambiar filtros ───────────────
   const [qDebounced, setQDebounced] = useState(busqueda);
   useEffect(() => { const t = setTimeout(() => setQDebounced(busqueda), 350); return () => clearTimeout(t); }, [busqueda]);
-  useEffect(() => { setPage(0); }, [qDebounced, region, cod, sort]);
+  useEffect(() => { setPage(0); }, [qDebounced, region, cod, sort, filtroRut]);
 
   // ── Fetch lista (siempre, datos reales paginados) ────────────────────────
   useEffect(() => {
     let alive = true; setLoadingLista(true);
-    fetchOcLista({ region: regionParam, cod, q: qDebounced || null, sort, limit: PAGE, offset: page * PAGE })
+    fetchOcLista({ region: regionParam, cod, q: qDebounced || null, sort, limit: PAGE, offset: page * PAGE,
+      compradorRut: filtroRut?.tipo === 'comprador' ? filtroRut.rut : null,
+      proveedorRut: filtroRut?.tipo === 'proveedor' ? filtroRut.rut : null })
       .then((r) => { if (alive) { setLista(r); setLoadingLista(false); } })
-      .catch(() => { if (alive) { setLista({ rows: [], has_more: false }); setLoadingLista(false); } });
+      .catch(() => { if (alive) { setLista({ rows: [], has_more: false, total: 0, capped: false }); setLoadingLista(false); } });
     return () => { alive = false; };
-  }, [regionParam, cod, qDebounced, sort, page]);
+  }, [regionParam, cod, qDebounced, sort, page, filtroRut]);
 
   // ── Fetch concentración scoped (solo si hay filtro) ──────────────────────
   useEffect(() => {
@@ -94,6 +114,16 @@ export function DashboardClient({
       .catch(() => { if (alive) { setConc(null); setLoadingConc(false); } });
     return () => { alive = false; };
   }, [regionParam, cod, scoped]);
+
+  // ── Fetch top organismos compradores (cuando el leaderboard está en ese modo) ──
+  useEffect(() => {
+    if (lbModo !== 'organismos') return;
+    let alive = true;
+    fetchOcTopCompradores(regionParam, cod)
+      .then((c) => { if (alive) setCompradores(c); })
+      .catch(() => { if (alive) setCompradores(null); });
+    return () => { alive = false; };
+  }, [lbModo, regionParam, cod]);
 
   // ── Vista de concentración: nacional (MV) o scoped (RPC) ─────────────────
   const nationalMonto = useMemo(() => data.regiones.reduce((s, r) => s + r.monto_total, 0), [data.regiones]);
@@ -182,7 +212,7 @@ export function DashboardClient({
               <AlertTriangle className="h-5 w-5 text-error flex-shrink-0 mt-0.5" strokeWidth={1.5} />
               <div className="flex-1">
                 <p className="text-sm font-medium text-app-text">{error}</p>
-                <button onClick={() => window.location.reload()} className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:underline">
+                <button onClick={() => window.location.reload()} className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:text-primary-hover">
                   <RotateCw className="h-3.5 w-3.5" /> Reintentar
                 </button>
               </div>
@@ -198,30 +228,48 @@ export function DashboardClient({
 
           {/* ── Leaderboard + competencia por región (lado a lado) ──────── */}
           <div className={cn('grid gap-4', cod ? 'grid-cols-1' : 'grid-cols-1 lg:grid-cols-2')}>
-            {concView && (
-              <Leaderboard rows={concView.leaderboard} montoTotal={concView.total_monto} scopeLabel={scopeLabel} onSelect={setSelectedProv} />
-            )}
+            <Leaderboard
+              modo={lbModo}
+              onModo={setLbModo}
+              scopeLabel={scopeLabel}
+              provRows={concView?.leaderboard ?? []}
+              provTotal={concView?.total_monto ?? 0}
+              orgRows={(compradores?.top ?? []).map((c, i) => ({ rnk: i + 1, rut: c.rut, nombre: c.nombre, region: null, n: c.n, monto: c.monto }))}
+              orgTotal={compradores?.total_monto ?? 0}
+              onSelectProv={setSelectedProv}
+              onSelectOrg={(it) => setOrgRut({ rut: it.rut, nombre: it.nombre })}
+            />
             {!cod && <CompetenciaRegional filas={competenciaRegional} regionSel={region} />}
           </div>
 
           {/* ── Evidencia: órdenes (datos reales paginados) ─────────────── */}
+          <div ref={evidenciaRef} className="scroll-mt-24">
           <Card>
-            <CardHeader className="flex flex-wrap items-center gap-3">
-              <div className="flex items-center gap-2">
-                <FileText className="h-4 w-4 text-app-text/40" strokeWidth={1.5} />
-                <span className="text-sm font-medium text-app-text">Órdenes · {scopeLabel}</span>
-                {loadingLista && <Loader2 className="h-3.5 w-3.5 animate-spin text-app-text/40" />}
+            <CardHeader className="space-y-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <FileText className="h-4 w-4 text-app-text/40" strokeWidth={1.5} />
+                  <span className="text-sm font-medium text-app-text">Órdenes · {scopeLabel}</span>
+                  {loadingLista && <Loader2 className="h-3.5 w-3.5 animate-spin text-app-text/40" />}
+                </div>
+                <div className="relative flex-1 min-w-[200px]">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-app-text/30 pointer-events-none" strokeWidth={1.5} />
+                  <Input type="text" aria-label="Buscar órdenes por proveedor, organismo o descripción" placeholder="Buscar proveedor, organismo…" value={busqueda} onChange={(e) => { setBusqueda(e.target.value); if (e.target.value) setFiltroRut(null); }} className="pl-8 text-sm py-1.5" />
+                </div>
+                <select value={sort} onChange={(e) => setSort(e.target.value as SortOC)} aria-label="Ordenar órdenes"
+                  className="text-sm bg-surface text-app-text border border-borders rounded-[6px] px-2 py-1.5 focus:outline-none focus:border-2 focus:border-primary cursor-pointer">
+                  <option value="recientes">Más recientes</option>
+                  <option value="monto">Mayor monto</option>
+                  <option value="fecha">Fecha de envío</option>
+                </select>
               </div>
-              <div className="relative flex-1 min-w-[200px]">
-                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-app-text/30 pointer-events-none" strokeWidth={1.5} />
-                <Input type="text" aria-label="Buscar órdenes por proveedor, organismo o descripción" placeholder="Buscar proveedor, organismo…" value={busqueda} onChange={(e) => setBusqueda(e.target.value)} className="pl-8 text-sm py-1.5" />
-              </div>
-              <select value={sort} onChange={(e) => setSort(e.target.value as SortOC)} aria-label="Ordenar órdenes"
-                className="text-sm bg-surface text-app-text border border-borders rounded-[6px] px-2 py-1.5 focus:outline-none focus:border-2 focus:border-primary cursor-pointer">
-                <option value="recientes">Más recientes</option>
-                <option value="monto">Mayor monto</option>
-                <option value="fecha">Fecha de envío</option>
-              </select>
+              {filtroRut && (
+                <button onClick={() => setFiltroRut(null)}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium bg-primary/10 text-primary rounded-full pl-2.5 pr-2 py-1 hover:bg-primary/20 transition-colors">
+                  {filtroRut.tipo === 'comprador' ? <Building2 className="h-3.5 w-3.5" /> : <Users className="h-3.5 w-3.5" />}
+                  {filtroRut.tipo === 'comprador' ? 'Organismo' : 'Proveedor'}: {filtroRut.nombre ?? filtroRut.rut} <X className="h-3.5 w-3.5" />
+                </button>
+              )}
             </CardHeader>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -236,15 +284,15 @@ export function DashboardClient({
                     <th scope="col" className="px-4 py-2.5 text-left text-xs font-medium text-app-text/50 uppercase tracking-wide">Envío</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-borders/30">
-                  {loadingLista ? (
-                    Array.from({ length: 8 }).map((_, i) => (
-                      <tr key={i}><td colSpan={7} className="px-4 py-2"><Skeleton className="h-6 w-full" /></td></tr>
+                <tbody className={cn('divide-y divide-borders/30 transition-opacity', loadingLista && lista && 'opacity-40')}>
+                  {!lista ? (
+                    Array.from({ length: PAGE }).map((_, i) => (
+                      <tr key={i}><td colSpan={7} className="px-4 py-2.5"><Skeleton className="h-5 w-full" /></td></tr>
                     ))
-                  ) : (lista?.rows.length ?? 0) === 0 ? (
+                  ) : lista.rows.length === 0 ? (
                     <tr><td colSpan={7} className="px-4 py-12 text-center text-sm text-app-text/40">No hay órdenes para este filtro.</td></tr>
                   ) : (
-                    lista!.rows.map((o) => (
+                    lista.rows.map((o) => (
                       <tr key={o.codigo}
                         onClick={() => setSelected(o)}
                         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(o); } }}
@@ -255,7 +303,16 @@ export function DashboardClient({
                           <div className="font-medium text-app-text truncate">{o.proveedor_nombre ?? '—'}</div>
                           <div className="text-xs text-app-text/40">{o.proveedor_rut}</div>
                         </td>
-                        <td className="px-4 py-2.5 text-app-text/60 text-xs whitespace-nowrap max-w-[160px]"><span className="truncate block">{o.comprador_nombre ?? '—'}</span></td>
+                        <td className="px-4 py-2.5 text-xs whitespace-nowrap max-w-[160px]">
+                          {o.comprador_rut ? (
+                            <button onClick={(e) => { e.stopPropagation(); setOrgRut({ rut: o.comprador_rut!, nombre: o.comprador_nombre }); }}
+                              className="truncate block max-w-[150px] text-primary hover:text-primary-hover text-left" title="Ver perfil del organismo">
+                              {o.comprador_nombre ?? '—'}
+                            </button>
+                          ) : (
+                            <span className="truncate block text-app-text/60">{o.comprador_nombre ?? '—'}</span>
+                          )}
+                        </td>
                         <td className="px-4 py-2.5 text-app-text/70 max-w-[240px]"><span className="line-clamp-2 text-xs leading-snug">{o.nombre ?? '—'}</span></td>
                         <td className="px-4 py-2.5"><EstadoBadge estado={o.estado_texto} /></td>
                         <td className="px-4 py-2.5 text-right font-medium text-app-text whitespace-nowrap">{o.total != null ? fmtCLP(o.total) : '—'}</td>
@@ -266,8 +323,9 @@ export function DashboardClient({
                 </tbody>
               </table>
             </div>
-            <Pager page={page} hasMore={lista?.has_more ?? false} onPage={setPage} loading={loadingLista} />
+            <Pager page={page} pageCount={Math.ceil((lista?.total ?? 0) / PAGE)} total={lista?.total ?? 0} capped={lista?.capped ?? false} noun="órdenes" onPage={setPage} loading={loadingLista} />
           </Card>
+          </div>
 
           {/* ── Análisis del mercado (colapsable) ───────────────────────── */}
           <details className="group bg-surface border border-borders rounded-[8px]">
@@ -336,33 +394,26 @@ export function DashboardClient({
         title={selectedProv?.nombre ?? 'Proveedor'} subtitle={selectedProv ? `#${selectedProv.rnk} · ${selectedProv.rut}` : undefined}>
         {selectedProv && concView && (
           <ProveedorDetalle prov={selectedProv} montoTotal={concView.total_monto} scopeLabel={scopeLabel}
-            onVerOrdenes={(nombre) => { setBusqueda(nombre); setSelectedProv(null); toast.success('Mostrando sus órdenes'); }} />
+            onVerOrdenes={() => { filtrarPorRut('proveedor', selectedProv.rut, selectedProv.nombre); toast.success('Mostrando sus órdenes'); }} />
         )}
       </DetailDrawer>
 
       {/* Drawer orden */}
       <DetailDrawer open={selected !== null} onClose={() => setSelected(null)}
         title={selected?.proveedor_nombre ?? selected?.codigo ?? 'Orden de compra'} subtitle={selected?.codigo}>
-        {selected && <OrdenDetalle orden={selected} onBuscarProveedor={(nombre) => { setBusqueda(nombre); setSelected(null); toast.success('Filtrando por proveedor'); }} />}
+        {selected && <OrdenDetalle orden={selected}
+          onBuscarProveedor={() => { if (selected.proveedor_rut) { filtrarPorRut('proveedor', selected.proveedor_rut, selected.proveedor_nombre); toast.success('Filtrando por proveedor'); } }} />}
       </DetailDrawer>
-    </div>
-  );
-}
 
-/* ── Paginación (por has_more, sin count total) ─────────────────────────── */
-function Pager({ page, hasMore, onPage, loading }: { page: number; hasMore: boolean; onPage: (p: number) => void; loading: boolean }) {
-  return (
-    <CardFooter className="flex items-center justify-end gap-2 text-xs text-app-text/50">
-      <button onClick={() => onPage(Math.max(0, page - 1))} disabled={page <= 0 || loading}
-        className="inline-flex items-center gap-1 px-2 py-1 rounded-[6px] border border-borders hover:bg-background disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
-        <ChevronLeft className="h-3.5 w-3.5" /> Anterior
-      </button>
-      <span className="tabular-nums" aria-live="polite">Página {page + 1}</span>
-      <button onClick={() => onPage(page + 1)} disabled={!hasMore || loading}
-        className="inline-flex items-center gap-1 px-2 py-1 rounded-[6px] border border-borders hover:bg-background disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
-        Siguiente <ChevronRight className="h-3.5 w-3.5" />
-      </button>
-    </CardFooter>
+      {/* Drawer organismo comprador */}
+      <OrganismoDrawer
+        rut={orgRut?.rut ?? null}
+        nombreInicial={orgRut?.nombre}
+        onClose={() => setOrgRut(null)}
+        onVerOrdenes={(rut, nombre) => { filtrarPorRut('comprador', rut, nombre); toast.success('Mostrando sus órdenes'); }}
+        onVerLicitaciones={(rut, nombre) => { router.push(`/licitaciones?compradorRut=${encodeURIComponent(rut)}&compradorNombre=${encodeURIComponent(nombre ?? '')}`); }}
+      />
+    </div>
   );
 }
 
@@ -422,21 +473,38 @@ function MiniStat({ label, value }: { label: string; value: string }) {
   );
 }
 
-/* ── ESTRELLA: leaderboard ──────────────────────────────────────────────── */
-function Leaderboard({ rows, montoTotal, scopeLabel, onSelect }: { rows: LBItem[]; montoTotal: number; scopeLabel: string; onSelect: (p: LBItem) => void }) {
+/* ── ESTRELLA: leaderboard con toggle Proveedores ⇄ Organismos ──────────── */
+function Leaderboard({ modo, onModo, scopeLabel, provRows, provTotal, orgRows, orgTotal, onSelectProv, onSelectOrg }: {
+  modo: 'proveedores' | 'organismos'; onModo: (m: 'proveedores' | 'organismos') => void;
+  scopeLabel: string;
+  provRows: LBItem[]; provTotal: number; orgRows: LBItem[]; orgTotal: number;
+  onSelectProv: (p: LBItem) => void; onSelectOrg: (p: LBItem) => void;
+}) {
+  const esProv = modo === 'proveedores';
+  const rows = (esProv ? provRows : orgRows).slice(0, 10);
+  const montoTotal = esProv ? provTotal : orgTotal;
+  const onSelect = esProv ? onSelectProv : onSelectOrg;
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="space-y-2">
         <div className="flex items-center gap-2 flex-wrap">
           <Trophy className="h-4 w-4 text-warning" strokeWidth={1.5} />
-          <span className="text-sm font-medium text-app-text">Quién domina el mercado</span>
+          <span className="text-sm font-medium text-app-text">{esProv ? 'Quién vende al Estado' : 'Quién compra'}</span>
           <span className="text-label text-app-text/40 ml-1 capitalize">{scopeLabel} · clic para ver detalle</span>
+        </div>
+        <div className="flex items-center gap-1 bg-background rounded-[6px] p-1 w-fit">
+          {([['proveedores', 'Proveedores'], ['organismos', 'Organismos']] as const).map(([k, lbl]) => (
+            <button key={k} onClick={() => onModo(k)}
+              className={cn('text-xs px-2.5 py-1 rounded-[4px] transition-colors', modo === k ? 'bg-surface shadow-sm font-medium text-app-text' : 'text-app-text/50 hover:text-app-text')}>
+              {lbl}
+            </button>
+          ))}
         </div>
       </CardHeader>
       <CardBody className="space-y-1.5 max-h-[440px] overflow-y-auto">
         {rows.length === 0 ? (
-          <p className="text-sm text-app-text/40 py-6 text-center">Sin proveedores para este filtro.</p>
-        ) : rows.slice(0, 10).map((p) => {
+          <p className="text-sm text-app-text/40 py-6 text-center">{esProv ? 'Sin proveedores' : 'Sin organismos'} para este filtro.</p>
+        ) : rows.map((p) => {
           const pct = montoTotal ? (p.monto / montoTotal) * 100 : 0;
           const ticket = p.n ? p.monto / p.n : 0;
           const podium = p.rnk <= 3;
@@ -466,7 +534,7 @@ function Leaderboard({ rows, montoTotal, scopeLabel, onSelect }: { rows: LBItem[
   );
 }
 
-function ProveedorDetalle({ prov, montoTotal, scopeLabel, onVerOrdenes }: { prov: LBItem; montoTotal: number; scopeLabel: string; onVerOrdenes: (nombre: string) => void }) {
+function ProveedorDetalle({ prov, montoTotal, scopeLabel, onVerOrdenes }: { prov: LBItem; montoTotal: number; scopeLabel: string; onVerOrdenes: () => void }) {
   const pct = montoTotal ? (prov.monto / montoTotal) * 100 : 0;
   const ticket = prov.n ? prov.monto / prov.n : 0;
   return (
@@ -490,7 +558,7 @@ function ProveedorDetalle({ prov, montoTotal, scopeLabel, onVerOrdenes }: { prov
           className="flex items-center justify-center gap-2 rounded-[8px] border border-borders bg-surface px-4 py-2 text-sm font-medium text-app-text hover:bg-background transition-colors">
           <Copy className="h-4 w-4" strokeWidth={1.5} /> Copiar RUT
         </button>
-        <button onClick={() => onVerOrdenes(prov.nombre)}
+        <button onClick={() => onVerOrdenes()}
           className="flex items-center justify-center gap-2 rounded-[8px] bg-primary px-4 py-2 text-sm font-medium text-surface hover:bg-primary-hover transition-colors">
           <FileText className="h-4 w-4" strokeWidth={1.5} /> Ver sus órdenes
         </button>
@@ -546,7 +614,7 @@ function EstadoBadge({ estado }: { estado: string | null }) {
   return <span className="inline-flex px-2.5 py-0.5 rounded-full text-xs font-medium whitespace-nowrap" style={{ background: `${color}26`, color }}>{e}</span>;
 }
 
-function OrdenDetalle({ orden, onBuscarProveedor }: { orden: OCOrden; onBuscarProveedor: (nombre: string) => void }) {
+function OrdenDetalle({ orden, onBuscarProveedor }: { orden: OCOrden; onBuscarProveedor: () => void }) {
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center gap-2">
@@ -575,8 +643,8 @@ function OrdenDetalle({ orden, onBuscarProveedor }: { orden: OCOrden; onBuscarPr
           className="flex items-center justify-center gap-2 rounded-[8px] border border-borders bg-surface px-4 py-2 text-sm font-medium text-app-text hover:bg-background transition-colors">
           <Copy className="h-4 w-4" strokeWidth={1.5} /> Copiar código
         </button>
-        {orden.proveedor_nombre && (
-          <button onClick={() => onBuscarProveedor(orden.proveedor_nombre!)}
+        {orden.proveedor_rut && (
+          <button onClick={() => onBuscarProveedor()}
             className="flex items-center justify-center gap-2 rounded-[8px] border border-borders bg-surface px-4 py-2 text-sm font-medium text-app-text hover:bg-background transition-colors">
             <Users className="h-4 w-4" strokeWidth={1.5} /> Buscar más de este proveedor
           </button>

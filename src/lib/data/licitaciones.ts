@@ -103,19 +103,35 @@ export async function getLicitacionesData(): Promise<LicitacionesData> {
 
 // ── Consultas on-demand sobre la tabla COMPLETA (vía RPC) ─────────────────────
 
-export interface LicListaResult { rows: Licitacion[]; has_more: boolean }
+export interface LicListaResult { rows: Licitacion[]; has_more: boolean; total: number; capped: boolean }
 
 export async function fetchLicLista(opts: {
   region?: string | null; cod?: number | null; estado?: string | null; tipo?: string | null;
   q?: string | null; sort?: 'recientes' | 'cierre' | 'monto'; limit?: number; offset?: number;
+  compradorRut?: string | null;
 }): Promise<LicListaResult> {
   const { data, error } = await supabase.rpc('lic_lista', {
     p_region: opts.region ?? null, p_cod: opts.cod ?? null, p_estado: opts.estado ?? null,
     p_tipo: opts.tipo ?? null, p_q: opts.q ?? null, p_sort: opts.sort ?? 'recientes',
-    p_limit: opts.limit ?? 25, p_offset: opts.offset ?? 0,
+    p_limit: opts.limit ?? 25, p_offset: opts.offset ?? 0, p_comprador_rut: opts.compradorRut ?? null,
   });
   if (error) throw new Error(error.message);
-  return (data ?? { rows: [], has_more: false }) as LicListaResult;
+  return (data ?? { rows: [], has_more: false, total: 0, capped: false }) as LicListaResult;
+}
+
+// ── "¿Conviene ofertar?": contexto competitivo de una licitación ──────────────
+export interface LicEvaluacion {
+  organismo: { rut: string; nombre: string | null; n_total: number; n_adjudicada: number; n_desierta: number; tasa_adjudicacion: number } | null;
+  rubros: string[];
+  ganadores_rubro: { nombre: string | null; n: number }[];
+  n_competidores: number;
+  monto_tipico: number | null;
+}
+
+export async function fetchLicEvaluacion(codigo: string): Promise<LicEvaluacion> {
+  const { data, error } = await supabase.rpc('lic_evaluacion', { p_codigo: codigo });
+  if (error) throw new Error(error.message);
+  return data as LicEvaluacion;
 }
 
 export interface LicResumen { n_total: number; n_publicada: number; n_adjudicada: number; n_desierta: number; monto: number }

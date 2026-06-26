@@ -4,8 +4,6 @@ import { DashboardClient } from './DashboardClient';
 // Datos provienen de vistas materializadas (snapshot); re-cachear cada 30 min.
 export const revalidate = 1800;
 
-export const metadata = { title: 'Licitapp — Órdenes de compra' };
-
 const EMPTY_DASHBOARD: DashboardData = {
   regiones: [], actores: [], estado: [], mensual: [],
   topProveedores: [], ordenes: [], totalProveedores: 0,

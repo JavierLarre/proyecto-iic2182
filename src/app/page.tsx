@@ -120,7 +120,7 @@ export default function LandingPage() {
               </span>
               <h2 className="text-h3 font-semibold text-app-text">{title}</h2>
               <p className="text-sm text-app-text/60 leading-relaxed flex-1">{desc}</p>
-              <span className="text-sm font-medium text-primary group-hover:underline">{cta} →</span>
+              <span className="text-sm font-medium text-primary group-hover:text-primary-hover">{cta} →</span>
             </Link>
           ))}
         </div>

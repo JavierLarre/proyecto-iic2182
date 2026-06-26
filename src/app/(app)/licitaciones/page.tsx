@@ -3,20 +3,19 @@ import { LicitacionesClient } from './LicitacionesClient';
 
 export const revalidate = 1800;
 
-export const metadata = { title: 'Licitapp — Oportunidades abiertas' };
-
 const EMPTY_LICITACIONES: LicitacionesData = {
   regiones: [], estado: [], mensual: [], topCompradores: [], licitaciones: [],
 };
 
 export default async function LicitacionesPage({
   searchParams,
-}: { searchParams: Promise<{ q?: string; region?: string; comunaCod?: string }> }) {
+}: { searchParams: Promise<{ q?: string; region?: string; comunaCod?: string; compradorRut?: string; compradorNombre?: string }> }) {
   const sp = await searchParams;
   const initialCod = sp.comunaCod ? Number(sp.comunaCod) : undefined;
   try {
     const data = await getLicitacionesData();
-    return <LicitacionesClient data={data} initialRegion={sp.region} initialBusqueda={sp.q} initialCod={initialCod} />;
+    return <LicitacionesClient data={data} initialRegion={sp.region} initialBusqueda={sp.q} initialCod={initialCod}
+      initialCompradorRut={sp.compradorRut} initialCompradorNombre={sp.compradorNombre} />;
   } catch {
     return (
       <LicitacionesClient

@@ -5,3 +5,4 @@ export { Badge } from './Badge';
 export { Tooltip } from './Tooltip';
 export { Skeleton, SkeletonCard, SkeletonRow } from './Skeleton';
 export { DetailDrawer } from './DetailDrawer';
+export { Pager } from './Pager';

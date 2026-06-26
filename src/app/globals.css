@@ -85,3 +85,17 @@
     font-family: var(--font-noto-sans), system-ui, sans-serif;
   }
 }
+
+/* Cursor de mano en todo lo clickeable (Tailwind v4 no lo aplica por defecto).
+   Fuera de @layer para ganar el orden de cascada sobre el preflight. */
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]),
+summary,
+label[for],
+select:not(:disabled) {
+  cursor: pointer;
+}
+button:disabled,
+[aria-disabled="true"] {
+  cursor: not-allowed;
+}

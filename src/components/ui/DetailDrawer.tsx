@@ -9,15 +9,23 @@ interface DetailDrawerProps {
   onClose: () => void;
   title: string;
   subtitle?: string;
+  size?: 'md' | 'lg' | 'xl';
   children: React.ReactNode;
 }
 
+const SIZE: Record<NonNullable<DetailDrawerProps['size']>, string> = {
+  md: 'max-w-md',
+  lg: 'max-w-xl',
+  xl: 'max-w-2xl',
+};
+
 /**
- * Panel lateral deslizante (right drawer). Se cierra con Escape, el botón
- * de cierre o haciendo clic en el overlay. Animación respetando
+ * Ventana modal centrada (mismo patrón que el panel de comuna del mapa): el fondo
+ * se desvanece y difumina, y una card aparece en el centro con fade + scale.
+ * Se cierra con Escape, el botón ✕ o haciendo clic en el backdrop. Respeta
  * prefers-reduced-motion mediante `motion-reduce:transition-none`.
  */
-export function DetailDrawer({ open, onClose, title, subtitle, children }: DetailDrawerProps) {
+export function DetailDrawer({ open, onClose, title, subtitle, size = 'lg', children }: DetailDrawerProps) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -28,26 +36,32 @@ export function DetailDrawer({ open, onClose, title, subtitle, children }: Detai
   }, [open, onClose]);
 
   return (
-    <>
-      {/* Overlay */}
+    <div
+      className={cn(
+        'fixed inset-0 z-50 flex items-center justify-center p-4',
+        open ? '' : 'pointer-events-none',
+      )}
+    >
+      {/* Backdrop: desvanece + difumina el fondo */}
       <div
-        aria-hidden={!open}
+        aria-hidden="true"
         onClick={onClose}
         className={cn(
-          'fixed inset-0 z-40 bg-app-text/20 transition-opacity duration-300 motion-reduce:transition-none',
-          open ? 'opacity-100' : 'pointer-events-none opacity-0',
+          'absolute inset-0 bg-app-text/30 backdrop-blur-sm transition-opacity duration-300 motion-reduce:transition-none',
+          open ? 'opacity-100' : 'opacity-0',
         )}
       />
 
-      {/* Panel */}
-      <aside
+      {/* Card centrada */}
+      <div
         role="dialog"
         aria-modal="true"
         aria-label={title}
         className={cn(
-          'fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col bg-surface shadow-2xl',
-          'border-l border-borders transition-transform duration-300 ease-in-out motion-reduce:transition-none',
-          open ? 'translate-x-0' : 'translate-x-full',
+          'relative flex w-full max-h-[88vh] flex-col overflow-hidden rounded-[12px]',
+          SIZE[size],
+          'border border-borders bg-surface shadow-2xl transition-all duration-300 ease-out motion-reduce:transition-none',
+          open ? 'opacity-100 scale-100' : 'opacity-0 scale-95',
         )}
       >
         <header className="flex items-start justify-between gap-3 border-b border-borders px-5 py-4 flex-shrink-0">
@@ -65,7 +79,7 @@ export function DetailDrawer({ open, onClose, title, subtitle, children }: Detai
         </header>
 
         <div className="flex-1 overflow-y-auto px-5 py-4">{children}</div>
-      </aside>
-    </>
+      </div>
+    </div>
   );
 }
