@@ -442,6 +442,7 @@ function ConcentracionHero({ c, scopeLabel }: {
               <p className="text-2xl font-bold text-app-text leading-tight">
                 Los 10 mayores concentran <span className="text-primary">{c.top10.toFixed(1)}%</span> del monto
               </p>
+              <p className="text-label text-app-text/40 mt-0.5">Solo compras concretadas (recepción conforme + aceptadas)</p>
             </div>
           </div>
           <span className={cn('text-xs font-semibold px-3 py-1 rounded-full self-center', nivelColor)}>Mercado {c.nivel.toLowerCase()}</span>
