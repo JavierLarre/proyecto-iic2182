@@ -1,36 +1,102 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Licitapp
 
-## Getting Started
+Aplicación web para analizar el mercado público chileno (órdenes de compra y licitaciones de Mercado Público / ChileCompra). Permite explorar la actividad por territorio, revisar la concentración de proveedores y compradores, y buscar oportunidades por rubro.
 
-First, run the development server:
+Despliegue: https://proyecto-licitapp.vercel.app/
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## Descripción
+
+Licitapp toma los datos abiertos de Mercado Público y los ordena en tres vistas que cubren el flujo de trabajo de un analista o consultor del sector público: dónde está la actividad, quién domina el mercado y qué oportunidad conviene revisar. Trabaja sobre el universo completo de datos (alrededor de 1,5 millones de órdenes de compra y 95 mil licitaciones), no sobre muestras.
+
+## Vistas principales
+
+1. **Mapa.** Explorador territorial. Mapa coroplético por comuna con métricas de monto y cantidad de órdenes y licitaciones. Al seleccionar una comuna se puede saltar a Órdenes o Licitaciones ya filtradas.
+2. **Órdenes de compra.** Inteligencia competitiva. Termómetro de concentración del mercado y ranking de proveedores y organismos compradores, con perfil de cada organismo (gasto, tasa de adjudicación, qué compra y a quién).
+3. **Licitaciones.** Radar de oportunidades. Búsqueda por rubro sobre los ítems de cada licitación, filtros por región, comuna, estado y tipo, y un bloque de contexto competitivo para evaluar si conviene ofertar.
+
+## Funcionalidades
+
+- Filtrado real en cascada por región y comuna, con re consulta al servidor.
+- Búsqueda de licitaciones por rubro indexando la categoría ONU/UNSPSC y la descripción de los ítems.
+- Perfil navegable de organismo comprador y de proveedor.
+- Paginación con total de resultados y navegación por páginas.
+- Estados de carga, vacío y error; notificaciones y accesibilidad (ARIA, foco y teclado).
+- Diseño responsivo.
+
+## Stack tecnológico
+
+- Next.js 16 (App Router) y React 19
+- TypeScript y Tailwind CSS 4
+- Supabase (PostgreSQL, funciones RPC y vistas materializadas)
+- MapLibre GL y deck.gl para el mapa coroplético
+- Recharts para gráficos, lucide-react para íconos, sonner para notificaciones
+- Despliegue en Vercel
+
+## Estructura del repositorio
+
+```
+src/
+  app/
+    page.tsx              Landing
+    (app)/mapa/           Vista de mapa
+    (app)/dashboard/      Vista de órdenes de compra
+    (app)/licitaciones/   Vista de licitaciones
+  components/             Componentes de UI y de mapa
+  lib/data/               Acceso a datos (Supabase RPC)
+scripts/
+  extractor.py            Extractor de la API de Mercado Público
+  build-comunas-geojson.mjs
+public/                   GeoJSON de comunas y recursos estáticos
+.github/workflows/        Extractor programado (GitHub Actions)
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Requisitos
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- Node.js 18 o superior
+- Yarn (el proyecto usa Yarn; también funciona con npm)
+- Una instancia de Supabase con los datos cargados
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Configuración
 
-## Learn More
+Crear un archivo `.env.local` en la raíz con las credenciales de Supabase:
 
-To learn more about Next.js, take a look at the following resources:
+```
+NEXT_PUBLIC_SUPABASE_URL=https://TU_PROYECTO.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=TU_ANON_KEY
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+La `SUPABASE_SERVICE_ROLE_KEY` solo se usa para el extractor de datos, no para la aplicación web.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Ejecución local
 
-## Deploy on Vercel
+```bash
+yarn install
+yarn dev
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+La aplicación queda disponible en http://localhost:3000.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Otros comandos:
+
+```bash
+yarn build    # compilación de producción
+yarn start    # servir la compilación
+yarn lint     # ESLint
+yarn test     # pruebas con Jest
+```
+
+## Datos y actualización
+
+Los datos provienen de la API pública de Mercado Público y se cargan en Supabase mediante un extractor en Python (`scripts/extractor.py`), que se ejecuta de forma programada con GitHub Actions. Requiere tickets de la API de Mercado Público y la service role key de Supabase (ver `scripts/.env.example`).
+
+Las vistas materializadas que alimentan la aplicación se refrescan a diario mediante un trabajo programado en la base de datos (pg_cron).
+
+## Despliegue
+
+El proyecto está desplegado en Vercel. Para que la aplicación muestre datos, las variables `NEXT_PUBLIC_SUPABASE_URL` y `NEXT_PUBLIC_SUPABASE_ANON_KEY` deben estar configuradas en el entorno de Vercel, ya que se incrustan en tiempo de compilación.
+
+## Contexto
+
+Proyecto del curso IIC2182 (Interfaces y Experiencia de Usuario), Pontificia Universidad Católica de Chile.
+
+Integrantes: Fernando Concha, Javier Larré y Monserrat Benavides.
